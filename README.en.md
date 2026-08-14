@@ -108,8 +108,6 @@ Sources/
 
 The app is connected to local inference for Z-Image Turbo text-to-image, Qwen3-VL image-to-text, Qwen 2511 image-to-image, LTX-2.3 MLX text-to-video and image-to-video, and Core ML Real-ESRGAN upscaling. The video runtime runs through the external `ltx-2-mlx` CLI; completed MP4 files are added to the workspace as assets with profile snapshots and lineage preserved.
 
-Remote downloads in Model Center currently provide the UI workflow foundation. Planned work includes resumable downloads, hash verification, persistence, and the complete app bundle/signing pipeline.
-
 More information:
 
 - [Architecture](docs/ARCHITECTURE.en.md)

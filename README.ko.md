@@ -108,8 +108,6 @@ Sources/
 
 앱은 Z-Image Turbo 텍스트→이미지, Qwen3-VL 이미지→텍스트, Qwen 2511 이미지→이미지, LTX-2.3 MLX 텍스트→비디오 및 이미지→비디오, Core ML Real-ESRGAN 업스케일의 로컬 추론에 연결되어 있습니다. 비디오 Runtime은 외부 `ltx-2-mlx` CLI를 통해 실행되며, 완료된 MP4는 프로필 스냅샷과 계보를 유지한 에셋으로 작업 공간에 추가됩니다.
 
-모델 센터의 원격 다운로드 기능은 현재 UI 작업 흐름의 기반을 제공합니다. 향후 이어받기 다운로드, 해시 검증, 영구 저장, 전체 App bundle/서명 흐름을 구현할 예정입니다.
-
 추가 정보:
 
 - [아키텍처](docs/ARCHITECTURE.ko.md)

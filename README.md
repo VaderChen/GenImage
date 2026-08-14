@@ -108,8 +108,6 @@ Sources/
 
 App 已接入真實本機推論：Z-Image Turbo 文生圖、Qwen3-VL 圖生文、Qwen 2511 圖生圖、LTX-2.3 MLX 文生影／圖生影，以及 Core ML Real-ESRGAN Upscale。影片 Runtime 透過外部 `ltx-2-mlx` CLI 執行，完成後以 MP4 資產加入工作區並保留 Profile 快照與 lineage。
 
-目前模型中心的遠端下載行為仍是 UI 工作流程骨架；下一階段是續傳下載、雜湊驗證、持久化，以及完整 App bundle／簽章流程。
-
 更多資訊：
 
 - [架構說明](docs/ARCHITECTURE.md)
