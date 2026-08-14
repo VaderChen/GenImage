@@ -61,6 +61,7 @@ public actor Qwen2511ImageToImageService: ImageToImageGenerating {
         let process = Process()
         process.executableURL = executable
         process.arguments = ["--request", requestURL.path]
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = logHandle
         process.standardError = logHandle
         runningProcess = process

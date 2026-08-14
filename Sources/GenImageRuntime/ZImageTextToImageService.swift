@@ -99,7 +99,7 @@ public actor ZImageTextToImageService: TextToImageGenerating {
                 case .decoding:
                     currentFraction = 0.90
                 case .saving:
-                    currentFraction = 1
+                    currentFraction = 0.98
                 }
                 lastFraction = max(lastFraction, currentFraction)
                 progress((Double(index) + lastFraction) / Double(outputCount))

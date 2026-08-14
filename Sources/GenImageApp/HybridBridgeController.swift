@@ -110,6 +110,9 @@ final class HybridBridgeController: NSObject, ObservableObject {
         case "openAsset":
             try openAsset(params)
 
+        case "revealAsset":
+            try revealAsset(params)
+
         case "downloadAsset":
             try downloadAsset(params)
 
@@ -201,6 +204,12 @@ final class HybridBridgeController: NSObject, ObservableObject {
             guard let model = model(from: params) else { throw BridgeError.invalidParameters }
             store.installModel(model)
 
+        case "installProfileModels":
+            guard let id = uuid(params["profileID"]) else {
+                throw BridgeError.invalidParameters
+            }
+            store.installProfileModels(id)
+
         case "pauseModel":
             guard let model = model(from: params) else { throw BridgeError.invalidParameters }
             store.pauseModel(model)
@@ -233,15 +242,40 @@ final class HybridBridgeController: NSObject, ObservableObject {
                   let modelID = params["modelID"] as? String,
                   let revision = params["modelRevision"] as? String,
                   let architectureRaw = params["architecture"] as? String,
-                  let architecture = InferenceArchitecture(rawValue: architectureRaw) else {
+                  let architecture = InferenceArchitecture(rawValue: architectureRaw),
+                  let loraValues = params["loras"] as? [[String: Any]] else {
                 throw BridgeError.invalidParameters
+            }
+            let loras = try loraValues.map { value -> ProfileLoRAConfiguration in
+                guard let modelID = value["modelID"] as? String,
+                      let scale = double(value["scale"]),
+                      let conditioningScale = double(value["conditioningScale"]) else {
+                    throw BridgeError.invalidParameters
+                }
+                let conditioning: ProfileLoRAConditioning?
+                if let rawConditioning = value["conditioning"] as? String,
+                   !rawConditioning.isEmpty {
+                    guard let parsed = ProfileLoRAConditioning(rawValue: rawConditioning) else {
+                        throw BridgeError.invalidParameters
+                    }
+                    conditioning = parsed
+                } else {
+                    conditioning = nil
+                }
+                return ProfileLoRAConfiguration(
+                    modelID: modelID,
+                    scale: scale,
+                    conditioning: conditioning,
+                    conditioningScale: conditioningScale
+                )
             }
             store.updateProfile(
                 id: id,
                 name: name,
                 modelID: modelID,
                 modelRevision: revision,
-                architecture: architecture
+                architecture: architecture,
+                loras: loras
             )
 
         case "deleteProfile":
@@ -375,6 +409,12 @@ final class HybridBridgeController: NSObject, ObservableObject {
         guard NSWorkspace.shared.open(url) else {
             throw BridgeError.assetActionFailed("無法開啟圖片檔案。")
         }
+    }
+
+    private func revealAsset(_ params: [String: Any]) throws {
+        let url = try assetURL(from: params)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        store.statusMessage = "已在 Finder 中開啟檔案所在目錄。"
     }
 
     private func downloadAsset(_ params: [String: Any]) throws {

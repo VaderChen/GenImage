@@ -19,6 +19,7 @@ public actor HuggingFaceModelInstaller {
     public static let zImage8BitModelID = "mzbac/z-image-turbo-8bit"
     public static let zImageFP16ModelID = "Tongyi-MAI/Z-Image-Turbo"
     public static let zImagePixelArtLoRAModelID = "tarn59/pixel_art_style_lora_z_image_turbo"
+    public static let ltx23UnionControlLoRAModelID = "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control"
     public static let captionerModelID = "local-captioner-3b@q4"
     public static let ltx23DistilledModelID = "Lightricks/LTX-2.3@distilled-1.1"
     public static let ltx23MLXQ4ModelID = "dgrauet/ltx-2.3-mlx-q4"
@@ -379,6 +380,23 @@ public actor HuggingFaceModelInstaller {
                         destinationSubdirectory: "",
                         prefixes: [],
                         exactFiles: ["pixel_art_style_z_image_turbo.safetensors"]
+                    )
+                ]
+            )
+        case ltx23UnionControlLoRAModelID:
+            return InstallPlan(
+                directoryName: "loras/ltx-2.3-union-control",
+                runtimeRelativePath: "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+                sources: [
+                    SourcePlan(
+                        repository: "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+                        destinationSubdirectory: "",
+                        prefixes: [],
+                        exactFiles: [
+                            "LICENSE",
+                            "README.md",
+                            "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
+                        ]
                     )
                 ]
             )

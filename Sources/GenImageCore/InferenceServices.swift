@@ -156,6 +156,7 @@ public struct VideoGenerationRequest: Sendable, Hashable {
     public var options: VideoGenerationOptions
     public var profile: InferenceProfile
     public var modelURL: URL
+    public var profileLoRAs: [VideoGenerationLoRA]
 
     public init(
         projectID: UUID,
@@ -163,7 +164,8 @@ public struct VideoGenerationRequest: Sendable, Hashable {
         sourceAsset: ImageAsset?,
         options: VideoGenerationOptions,
         profile: InferenceProfile,
-        modelURL: URL
+        modelURL: URL,
+        profileLoRAs: [VideoGenerationLoRA] = []
     ) {
         self.projectID = projectID
         self.recipeID = recipeID
@@ -171,6 +173,23 @@ public struct VideoGenerationRequest: Sendable, Hashable {
         self.options = options
         self.profile = profile
         self.modelURL = modelURL
+        self.profileLoRAs = profileLoRAs
+    }
+}
+
+public struct VideoGenerationLoRA: Sendable, Hashable {
+    public var modelID: String
+    public var localURL: URL
+    public var scale: Double
+    public var conditioning: ProfileLoRAConditioning?
+    public var conditioningScale: Double
+
+    public init(configuration: ProfileLoRAConfiguration, localURL: URL) {
+        modelID = configuration.modelID
+        self.localURL = localURL
+        scale = configuration.scale
+        conditioning = configuration.conditioning
+        conditioningScale = configuration.conditioningScale
     }
 }
 

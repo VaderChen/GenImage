@@ -1371,6 +1371,37 @@ button:disabled {
   gap: 4px;
 }
 
+.profile-lora-editor,
+.profile-lora-list {
+  display: grid;
+  gap: 8px;
+}
+
+.profile-lora-editor {
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.profile-lora-heading {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  font-size: 11px;
+  justify-content: space-between;
+}
+
+.profile-lora-row {
+  background: var(--surface-muted);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+}
+
+.profile-lora-row > button {
+  justify-self: start;
+}
+
 .search-field {
   height: 34px;
   padding: 6px 10px;

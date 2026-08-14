@@ -87,8 +87,8 @@ public enum LocalModelDiscovery {
                 modelRevision: "distilled-1.1",
                 architecture: .externalCLI,
                 defaults: ProfileDefaults(
-                    width: 768,
-                    height: 512,
+                    width: 1280,
+                    height: 720,
                     steps: 8,
                     outputCount: 1,
                     frameCount: 121,
@@ -189,8 +189,8 @@ public enum LocalModelDiscovery {
                     modelRevision: "main",
                     architecture: .externalCLI,
                     defaults: ProfileDefaults(
-                        width: 1344,
-                        height: 768,
+                        width: 1280,
+                        height: 720,
                         steps: 16,
                         outputCount: 1,
                         frameCount: 124,
@@ -256,14 +256,22 @@ public enum LocalModelDiscovery {
                 modelRevision: "main",
                 architecture: .externalCLI,
                 defaults: ProfileDefaults(
-                    width: 704,
-                    height: 480,
+                    width: 1280,
+                    height: 720,
                     steps: 8,
                     outputCount: 1,
                     frameCount: 97,
                     frameRate: 24
                 ),
-                notes: "從 \(directory.path) 自動偵測；由 ltx-2-mlx 使用 Apple Silicon Metal 執行。",
+                loras: [
+                    ProfileLoRAConfiguration(
+                        modelID: "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+                        scale: 1,
+                        conditioning: .sourceImageCanny,
+                        conditioningScale: 1
+                    )
+                ],
+                notes: "從 \(directory.path) 自動偵測；預設使用 Union Control IC-LoRA 與來源圖片 Canny 控制影片，由 ltx-2-mlx 使用 Apple Silicon Metal 執行。",
                 isBuiltIn: true
             )
         )
@@ -275,8 +283,8 @@ public enum LocalModelDiscovery {
                 modelRevision: "main",
                 architecture: .externalCLI,
                 defaults: ProfileDefaults(
-                    width: 704,
-                    height: 480,
+                    width: 1280,
+                    height: 720,
                     steps: 8,
                     outputCount: 1,
                     frameCount: 97,
@@ -408,9 +416,13 @@ public enum LocalModelDiscovery {
 
             let manifestURL = normalizedURL.deletingLastPathComponent()
                 .appendingPathComponent("genimage-model.json")
-            if let manifestData = try? Data(contentsOf: manifestURL),
-               let manifest = try? JSONDecoder().decode(ManagedModelManifest.self, from: manifestData),
-               manifest.modelID == "tarn59/pixel_art_style_lora_z_image_turbo" {
+            guard let manifestData = try? Data(contentsOf: manifestURL),
+                  let manifest = try? JSONDecoder().decode(
+                      ManagedModelManifest.self,
+                      from: manifestData
+                  ) else { continue }
+            switch manifest.modelID {
+            case "tarn59/pixel_art_style_lora_z_image_turbo":
                 managedModels[manifest.modelID] = ModelDescriptor(
                     id: manifest.modelID,
                     displayName: "Z-Image Turbo Pixel Art LoRA（本機）",
@@ -425,6 +437,24 @@ public enum LocalModelDiscovery {
                     localURL: normalizedURL,
                     isRecommended: true
                 )
+            case "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control":
+                discovered[id]?.compatibleCapabilities = [.imageToVideo]
+                managedModels[manifest.modelID] = ModelDescriptor(
+                    id: manifest.modelID,
+                    displayName: "LTX-2.3 IC-LoRA Union Control（本機）",
+                    publisher: "Local / Lightricks",
+                    summary: "已安裝 LTX-2.3 Union Control LoRA，可供圖生影 Profile 使用 Canny 逐幀控制。",
+                    capabilities: [.lora],
+                    quantization: .lora,
+                    approximateDownloadGB: sizeInGB(of: normalizedURL, fileManager: fileManager),
+                    recommendedMemoryGB: 24,
+                    licenseName: "LTX-2 Community License",
+                    sourceURL: URL(string: "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control"),
+                    localURL: normalizedURL,
+                    isRecommended: true
+                )
+            default:
+                break
             }
         }
         result.loras = discovered.values.sorted {

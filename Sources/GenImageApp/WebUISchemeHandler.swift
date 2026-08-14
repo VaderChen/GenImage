@@ -9,12 +9,27 @@ final class WebUISchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Sendabl
     private let resourceRoot: URL?
 
     override init() {
-        resourceRoot = Bundle.module.url(
+        resourceRoot = Self.locateResourceRoot()
+        super.init()
+    }
+
+    private static func locateResourceRoot() -> URL? {
+        if let packagedRoot = Bundle.main.resourceURL?
+            .appendingPathComponent("WebUI", isDirectory: true)
+            .standardizedFileURL,
+           FileManager.default.fileExists(
+            atPath: packagedRoot.appendingPathComponent("index.html").path
+           ) {
+            return packagedRoot
+        }
+        if Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
+            return nil
+        }
+        return Bundle.module.url(
             forResource: "index",
             withExtension: "html",
             subdirectory: "WebUI"
         )?.deletingLastPathComponent().standardizedFileURL
-        super.init()
     }
 
     var canServeResources: Bool {

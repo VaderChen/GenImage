@@ -41,6 +41,19 @@ public enum ModelCatalog {
             isRecommended: true
         ),
         ModelDescriptor(
+            id: "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+            displayName: "LTX-2.3 IC-LoRA Union Control",
+            publisher: "Lightricks",
+            summary: "LTX-2.3 官方 Union Control LoRA，可用 Canny、深度或姿態控制逐幀結構，降低圖生影的人物與場景漂移。",
+            capabilities: [.lora],
+            quantization: .lora,
+            approximateDownloadGB: 0.61,
+            recommendedMemoryGB: 24,
+            licenseName: "LTX-2 Community License",
+            sourceURL: URL(string: "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control"),
+            isRecommended: true
+        ),
+        ModelDescriptor(
             id: "local-captioner-3b@q4",
             displayName: "Qwen3-VL 4B 4-bit",
             publisher: "Qwen / MLX Community",
@@ -234,8 +247,8 @@ public enum ModelCatalog {
             modelRevision: "main",
             architecture: .externalCLI,
             defaults: ProfileDefaults(
-                width: 768,
-                height: 512,
+                width: 1280,
+                height: 720,
                 steps: 8,
                 outputCount: 1,
                 frameCount: 121,
@@ -251,14 +264,22 @@ public enum ModelCatalog {
             modelRevision: "main",
             architecture: .externalCLI,
             defaults: ProfileDefaults(
-                width: 704,
-                height: 480,
+                width: 1280,
+                height: 720,
                 steps: 8,
                 outputCount: 1,
                 frameCount: 97,
                 frameRate: 24
             ),
-            notes: "原生 MLX INT4 LTX-2.3 Profile；由 ltx-2-mlx 使用 Apple Silicon Metal 執行。建議 24GB 以上記憶體，需安裝 ltx-2-mlx Python Runtime。",
+            loras: [
+                ProfileLoRAConfiguration(
+                    modelID: "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+                    scale: 1,
+                    conditioning: .sourceImageCanny,
+                    conditioningScale: 1
+                )
+            ],
+            notes: "原生 MLX INT4 LTX-2.3 Profile；預設使用 Union Control IC-LoRA 與來源圖片 Canny 控制影片，降低逐幀人物與場景漂移。由 ltx-2-mlx 使用 Apple Silicon Metal 執行，建議 24GB 以上記憶體。",
             isBuiltIn: true
         ),
         InferenceProfile(
@@ -268,8 +289,8 @@ public enum ModelCatalog {
             modelRevision: "main",
             architecture: .externalCLI,
             defaults: ProfileDefaults(
-                width: 704,
-                height: 480,
+                width: 1280,
+                height: 720,
                 steps: 8,
                 outputCount: 1,
                 frameCount: 97,
@@ -285,8 +306,8 @@ public enum ModelCatalog {
             modelRevision: "main",
             architecture: .externalCLI,
             defaults: ProfileDefaults(
-                width: 1344,
-                height: 768,
+                width: 1280,
+                height: 720,
                 steps: 16,
                 outputCount: 1,
                 frameCount: 124,
@@ -302,8 +323,8 @@ public enum ModelCatalog {
             modelRevision: "main",
             architecture: .externalCLI,
             defaults: ProfileDefaults(
-                width: 1344,
-                height: 768,
+                width: 1280,
+                height: 720,
                 steps: 16,
                 outputCount: 1,
                 frameCount: 124,

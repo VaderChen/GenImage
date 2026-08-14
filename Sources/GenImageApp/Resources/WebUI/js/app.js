@@ -2,10 +2,15 @@ import { invoke, onClipboardImage, onState } from "./bridge.js";
 import { escapeHTML } from "./format.js";
 import { getLocale, setLocale, t } from "./i18n.js";
 import { renderModels } from "./models.js";
-import { renderProfiles } from "./profiles.js";
+import { appendProfileLoRARow, removeProfileLoRARow, renderProfiles } from "./profiles.js";
 import { renderSettings } from "./settings.js";
 import { getTheme, setTheme } from "./themes.js";
-import { refreshJobTimings, renderQuickTools, renderWorkspace } from "./workspace.js";
+import {
+  isInferenceBusy,
+  refreshJobTimings,
+  renderQuickTools,
+  renderWorkspace,
+} from "./workspace.js";
 
 const root = document.querySelector("#app");
 const WORKSPACE_TABS_KEY = "genimage.workspaceTabs";
@@ -222,12 +227,11 @@ root.addEventListener("click", async (event) => {
       case "aspectRatio": {
         const outputKind = target.dataset.outputKind === "video" ? "video" : "image";
         const settings = outputKind === "video" ? state.videoOutputSettings : state.recipe;
-        const dimensions = dimensionsForAspect(
-          "width",
-          settings.width,
-          Number(target.dataset.ratioWidth),
-          Number(target.dataset.ratioHeight),
-        );
+        const ratioWidth = Number(target.dataset.ratioWidth);
+        const ratioHeight = Number(target.dataset.ratioHeight);
+        const dimensions = outputKind === "video"
+          ? defaultVideoDimensionsForAspect(ratioWidth, ratioHeight)
+          : dimensionsForAspect("width", settings.width, ratioWidth, ratioHeight);
         settings.width = dimensions.width;
         settings.height = dimensions.height;
         render();
@@ -261,6 +265,9 @@ root.addEventListener("click", async (event) => {
       case "repairModel":
         await invoke(action, { modelID: target.dataset.modelId });
         break;
+      case "installProfileModels":
+        await invoke("installProfileModels", { profileID: target.dataset.profileId });
+        break;
       case "createProfile":
         await invoke("createProfile", { capability: target.dataset.capability });
         break;
@@ -281,6 +288,12 @@ root.addEventListener("click", async (event) => {
         break;
       case "saveProfile":
         await saveProfile(target.dataset.profileId);
+        break;
+      case "addProfileLoRA":
+        appendProfileLoRARow(target);
+        break;
+      case "removeProfileLoRA":
+        removeProfileLoRARow(target);
         break;
       case "deleteProfile":
         await invoke("deleteProfile", { profileID: target.dataset.profileId });
@@ -548,6 +561,7 @@ function openImageContextMenu(clientX, clientY, assetID) {
   menu.setAttribute("role", "menu");
   menu.innerHTML = [
     ["openAsset", t("context.openImage")],
+    ["revealAsset", t("context.openDirectory")],
     ["downloadAsset", t("context.downloadImage")],
     ["copyAsset", t("context.copyImage")],
     ["shareAsset", t("context.shareImage")],
@@ -871,6 +885,11 @@ function quantizeDimension(value) {
   return Math.min(4096, Math.max(64, Math.round(value / 16) * 16));
 }
 
+function defaultVideoDimensionsForAspect(ratioWidth, ratioHeight) {
+  const anchor = ratioWidth >= ratioHeight ? "width" : "height";
+  return dimensionsForAspect(anchor, 1280, ratioWidth, ratioHeight);
+}
+
 function dimensionsForAspect(anchor, value, ratioWidth, ratioHeight) {
   const safeWidth = Math.max(1, ratioWidth);
   const safeHeight = Math.max(1, ratioHeight);
@@ -1037,13 +1056,16 @@ function renderWorkspaceTabRenameDialog() {
 
 function renderPasteDialog() {
   if (!ui.pasteDialogOpen || !pasteState.image) return "";
+  const inferenceDisabledAttribute = isInferenceBusy(state)
+    ? "disabled aria-busy=\"true\""
+    : "";
   return `<div class="dialog-backdrop">
     <section class="paste-dialog" role="dialog" aria-modal="true" aria-labelledby="paste-dialog-title">
       <h2 id="paste-dialog-title">${t("clipboard.imageDetected")}</h2>
       <p>${t("clipboard.describeQuestion", { name: escapeHTML(pasteState.image.name) })}</p>
       <div class="dialog-actions">
         <button class="secondary-button" data-action="pasteImageDecision" data-describe="false">${t("common.no")}</button>
-        <button class="primary-button" data-action="pasteImageDecision" data-describe="true">${t("common.yes")}</button>
+        <button class="primary-button" data-action="pasteImageDecision" data-describe="true" ${inferenceDisabledAttribute}>${t("common.yes")}</button>
       </div>
     </section>
   </div>`;
@@ -1148,12 +1170,24 @@ function saveProfile(profileID) {
   const card = root.querySelector(`[data-profile-card="${CSS.escape(profileID)}"]`);
   if (!card) return Promise.resolve();
   const field = (name) => card.querySelector(`[data-profile-field="${name}"]`)?.value || "";
+  const loras = Array.from(card.querySelectorAll("[data-profile-lora-row]"))
+    .map((row) => {
+      const loraField = (name) => row.querySelector(`[data-profile-lora-field="${name}"]`)?.value || "";
+      return {
+        modelID: loraField("modelID").trim(),
+        scale: Number(loraField("scale") || 1),
+        conditioning: loraField("conditioning") || null,
+        conditioningScale: Number(loraField("conditioningScale") || 1),
+      };
+    })
+    .filter(({ modelID }) => modelID);
   return invoke("updateProfile", {
     profileID,
     name: field("name"),
     modelID: field("modelID"),
     modelRevision: field("modelRevision"),
     architecture: field("architecture"),
+    loras,
   });
 }
 

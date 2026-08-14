@@ -65,21 +65,30 @@ public actor QwenVLImageDescriptionService: ImageDescribing {
         ]
 
         var receivedText = false
+        var generationProgressBase = 0.55
+        let expectedGenerationChunks = min(maxTokens, 192)
         for (attemptIndex, parameters) in attempts.enumerated() {
             let input = UserInput(chat: [
                 .user(prompt, images: [.url(preparedImage.url)])
             ])
             let prepared = try await modelContainer.prepare(input: input)
-            progress(attemptIndex == 0 ? 0.55 : 0.78)
-            let description = try await generateDescription(
+            progress(generationProgressBase)
+            let progressEnd = attemptIndex == 0 ? 0.95 : 0.99
+            let generation = try await generateDescription(
                 modelContainer: modelContainer,
                 input: prepared,
                 parameters: parameters,
-                maxTokens: maxTokens,
-                progressBase: attemptIndex == 0 ? 0.55 : 0.78,
-                progressSpan: attemptIndex == 0 ? 0.23 : 0.20,
+                expectedChunks: expectedGenerationChunks,
+                progressBase: generationProgressBase,
+                progressSpan: progressEnd - generationProgressBase,
                 progress: progress
             )
+            let description = generation.text
+            let completedFraction = min(
+                1,
+                Double(generation.chunks) / Double(expectedGenerationChunks)
+            )
+            generationProgressBase += (progressEnd - generationProgressBase) * completedFraction
             receivedText = receivedText || !description.isEmpty
             if Self.isUsableDescription(description) {
                 progress(1)
@@ -141,15 +150,20 @@ public actor QwenVLImageDescriptionService: ImageDescribing {
         return (temporaryURL, true)
     }
 
+    private struct DescriptionGenerationResult {
+        var text: String
+        var chunks: Int
+    }
+
     private func generateDescription(
         modelContainer: ModelContainer,
         input: sending LMInput,
         parameters: GenerateParameters,
-        maxTokens: Int,
+        expectedChunks: Int,
         progressBase: Double,
         progressSpan: Double,
         progress: @escaping @Sendable (Double) -> Void
-    ) async throws -> String {
+    ) async throws -> DescriptionGenerationResult {
         let stream = try await modelContainer.generate(input: input, parameters: parameters)
         var result = ""
         var chunks = 0
@@ -161,14 +175,17 @@ public actor QwenVLImageDescriptionService: ImageDescribing {
                 chunks += 1
                 let generationProgress = min(
                     progressBase + progressSpan,
-                    progressBase + Double(chunks) / Double(maxTokens) * progressSpan
+                    progressBase + Double(chunks) / Double(expectedChunks) * progressSpan
                 )
                 progress(generationProgress)
                 if Self.isClearlyDegenerate(result) { break }
             }
         }
 
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return DescriptionGenerationResult(
+            text: result.trimmingCharacters(in: .whitespacesAndNewlines),
+            chunks: chunks
+        )
     }
 
     private static func isUsableDescription(_ text: String) -> Bool {

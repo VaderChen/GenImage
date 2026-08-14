@@ -66,6 +66,29 @@ public enum InferenceArchitecture: String, CaseIterable, Codable, Hashable, Send
     }
 }
 
+public enum ProfileLoRAConditioning: String, CaseIterable, Codable, Hashable, Sendable {
+    case sourceImageCanny
+}
+
+public struct ProfileLoRAConfiguration: Codable, Hashable, Sendable {
+    public var modelID: String
+    public var scale: Double
+    public var conditioning: ProfileLoRAConditioning?
+    public var conditioningScale: Double
+
+    public init(
+        modelID: String,
+        scale: Double = 1,
+        conditioning: ProfileLoRAConditioning? = nil,
+        conditioningScale: Double = 1
+    ) {
+        self.modelID = modelID
+        self.scale = scale
+        self.conditioning = conditioning
+        self.conditioningScale = conditioningScale
+    }
+}
+
 public struct ProfileDefaults: Codable, Hashable, Sendable {
     public var width: Int?
     public var height: Int?
@@ -111,6 +134,7 @@ public struct InferenceProfile: Identifiable, Codable, Hashable, Sendable {
     public var modelRevision: String
     public var architecture: InferenceArchitecture
     public var defaults: ProfileDefaults
+    public var loras: [ProfileLoRAConfiguration]
     public var profileRevision: Int
     public var notes: String
     public var isBuiltIn: Bool
@@ -123,6 +147,7 @@ public struct InferenceProfile: Identifiable, Codable, Hashable, Sendable {
         modelRevision: String = "main",
         architecture: InferenceArchitecture,
         defaults: ProfileDefaults = ProfileDefaults(),
+        loras: [ProfileLoRAConfiguration] = [],
         profileRevision: Int = 1,
         notes: String = "",
         isBuiltIn: Bool = false
@@ -134,9 +159,61 @@ public struct InferenceProfile: Identifiable, Codable, Hashable, Sendable {
         self.modelRevision = modelRevision
         self.architecture = architecture
         self.defaults = defaults
+        self.loras = loras
         self.profileRevision = profileRevision
         self.notes = notes
         self.isBuiltIn = isBuiltIn
+    }
+
+    public var requiredModelIDs: [String] {
+        ([modelID] + loras.map(\.modelID)).reduce(into: []) { result, modelID in
+            if !result.contains(modelID) { result.append(modelID) }
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case capability
+        case modelID
+        case modelRevision
+        case architecture
+        case defaults
+        case loras
+        case profileRevision
+        case notes
+        case isBuiltIn
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        capability = try container.decode(ModelCapability.self, forKey: .capability)
+        modelID = try container.decode(String.self, forKey: .modelID)
+        modelRevision = try container.decodeIfPresent(String.self, forKey: .modelRevision) ?? "main"
+        architecture = try container.decode(InferenceArchitecture.self, forKey: .architecture)
+        defaults = try container.decodeIfPresent(ProfileDefaults.self, forKey: .defaults)
+            ?? ProfileDefaults()
+        loras = try container.decodeIfPresent([ProfileLoRAConfiguration].self, forKey: .loras) ?? []
+        profileRevision = try container.decodeIfPresent(Int.self, forKey: .profileRevision) ?? 1
+        notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        isBuiltIn = try container.decodeIfPresent(Bool.self, forKey: .isBuiltIn) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(capability, forKey: .capability)
+        try container.encode(modelID, forKey: .modelID)
+        try container.encode(modelRevision, forKey: .modelRevision)
+        try container.encode(architecture, forKey: .architecture)
+        try container.encode(defaults, forKey: .defaults)
+        try container.encode(loras, forKey: .loras)
+        try container.encode(profileRevision, forKey: .profileRevision)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(isBuiltIn, forKey: .isBuiltIn)
     }
 }
 
@@ -188,17 +265,20 @@ public struct LoRADescriptor: Identifiable, Codable, Hashable, Sendable {
     public var displayName: String
     public var localURL: URL
     public var fileSizeMB: Double
+    public var compatibleCapabilities: Set<ModelCapability>
 
     public init(
         id: String,
         displayName: String,
         localURL: URL,
-        fileSizeMB: Double
+        fileSizeMB: Double,
+        compatibleCapabilities: Set<ModelCapability> = [.textToImage]
     ) {
         self.id = id
         self.displayName = displayName
         self.localURL = localURL
         self.fileSizeMB = fileSizeMB
+        self.compatibleCapabilities = compatibleCapabilities
     }
 }
 

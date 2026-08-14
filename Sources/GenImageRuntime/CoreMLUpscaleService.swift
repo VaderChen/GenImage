@@ -55,7 +55,9 @@ public actor CoreMLUpscaleService: ImageUpscaling {
             throw CoreMLUpscaleError.invalidInputImage(inputURL)
         }
 
+        progress(0.02)
         let model = try loadModel(at: modelURL)
+        progress(0.08)
         let tileSize = request.profile.defaults.tileSize ?? 512
         guard tileSize == 512 else {
             throw CoreMLUpscaleError.unsupportedTileSize(tileSize)
@@ -124,7 +126,8 @@ public actor CoreMLUpscaleService: ImageUpscaling {
                 composed = croppedOutput.composited(over: composed)
 
                 completedTiles += 1
-                progress(Double(completedTiles) / Double(totalTiles))
+                let tileProgress = Double(completedTiles) / Double(totalTiles)
+                progress(0.08 + tileProgress * 0.84)
             }
         }
 
@@ -136,12 +139,14 @@ public actor CoreMLUpscaleService: ImageUpscaling {
             "\(request.asset.id.uuidString)-upscale-\(request.scale)x-\(UUID().uuidString).png"
         )
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        progress(0.94)
         try context.writePNGRepresentation(
             of: composed,
             to: outputURL,
             format: .RGBA8,
             colorSpace: colorSpace
         )
+        progress(1)
 
         return ImageAsset(
             projectID: request.asset.projectID,

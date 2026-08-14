@@ -70,6 +70,7 @@ function renderProfileCard(profile, isActive, isDisabled, models) {
         <span>${t("profile.model")}</span><strong title="${escapeHTML(profile.modelID)}">${escapeHTML(profile.modelID)}</strong>
         <span>${t("profile.modelRevision")}</span><strong>${escapeHTML(profile.modelRevision)}</strong>
         <span>${t("profile.defaults")}</span><strong>${defaultsSummary(profile.defaults)}</strong>
+        <span>${t("profile.loras")}</span><strong>${profileLoRASummary(profile, models)}</strong>
       </div>
       ${profile.isBuiltIn ? renderBuiltInActions(profile, isActive, models) : renderProfileForm(profile, isActive, models)}
     </article>
@@ -80,7 +81,7 @@ function renderBuiltInActions(profile, isActive, models) {
   return `<div class="button-row">
     ${renderActivationButton(profile, isActive, models)}
     <button class="secondary-button compact" data-action="duplicateProfile" data-profile-id="${profile.id}">${t("profile.duplicate")}</button>
-    ${renderModelInstallButton(profile, models)}
+    ${renderProfileInstallButton(profile, models)}
   </div>`;
 }
 
@@ -88,8 +89,9 @@ function renderActivationButton(profile, isActive, models = []) {
   if (isActive) {
     return `<button class="danger-button compact" data-action="deactivateProfile" data-profile-id="${profile.id}" data-capability="${profile.capability}">${t("profile.deactivate")}</button>`;
   }
-  const model = models.find(({ descriptor }) => descriptor.id === profile.modelID);
-  const isInstalled = model?.installation.phase === "installed";
+  const isInstalled = profileDependencies(profile)
+    .every((modelID) => models.some(({ descriptor, installation }) =>
+      descriptor.id === modelID && installation.phase === "installed"));
   return `<button class="primary-button compact" data-action="activateProfile" data-profile-id="${profile.id}" data-capability="${profile.capability}" ${isInstalled ? "" : `disabled title="${escapeHTML(t("profile.installRequired"))}"`}>${t("profile.activate")}</button>`;
 }
 
@@ -113,29 +115,94 @@ function renderProfileForm(profile, isActive, models) {
             .join("")}
         </select>
       </label>
+      <div class="profile-lora-editor">
+        <div class="profile-lora-heading">
+          <span>${t("profile.loras")}</span>
+          <button type="button" class="secondary-button compact" data-action="addProfileLoRA">＋ ${t("profile.addLoRA")}</button>
+        </div>
+        <div class="profile-lora-list" data-profile-lora-list>
+          ${(profile.loras || []).map(renderProfileLoRARow).join("")}
+        </div>
+      </div>
     </div>
     <div class="button-row">
       <button class="primary-button compact" data-action="saveProfile" data-profile-id="${profile.id}">${t("profile.save")}</button>
       ${renderActivationButton(profile, isActive, models)}
-      ${renderModelInstallButton(profile, models)}
+      ${renderProfileInstallButton(profile, models)}
       <button class="danger-button compact" data-action="deleteProfile" data-profile-id="${profile.id}">${t("profile.delete")}</button>
     </div>
   `;
 }
 
-function renderModelInstallButton(profile, models = []) {
-  const model = models.find(({ descriptor }) => descriptor.id === profile.modelID);
-  if (!model) return "";
+function renderProfileInstallButton(profile, models = []) {
+  const modelIDs = profileDependencies(profile);
+  const dependencies = modelIDs
+    .map((modelID) => models.find(({ descriptor }) => descriptor.id === modelID))
+    .filter(Boolean);
+  if (dependencies.length !== modelIDs.length) {
+    return `<button class="secondary-button compact" disabled>${t("profile.dependencyMissing")}</button>`;
+  }
+  if (dependencies.every(({ installation }) => installation.phase === "installed")) {
+    return `<button class="secondary-button compact" disabled>${t("profile.dependenciesInstalled")}</button>`;
+  }
+  const activeDownload = dependencies.find(({ installation }) =>
+    ["queued", "downloading", "verifying"].includes(installation.phase));
+  if (activeDownload) {
+    return `<button class="secondary-button compact" disabled>${t(`phase.${activeDownload.installation.phase}`)}</button>`;
+  }
+  return `<button class="install-button compact" data-action="installProfileModels" data-profile-id="${profile.id}">${t("profile.installDependencies")}</button>`;
+}
 
-  const phase = model.installation.phase;
-  if (phase === "installed") {
-    return `<button class="secondary-button compact" disabled>${t("phase.installed")}</button>`;
-  }
-  if (["queued", "downloading", "verifying"].includes(phase)) {
-    return `<button class="secondary-button compact" disabled>${t(`phase.${phase}`)}</button>`;
-  }
-  const label = phase === "paused" ? t("model.resume") : t("model.install");
-  return `<button class="install-button compact" data-action="installModel" data-model-id="${escapeHTML(model.descriptor.id)}">${label}</button>`;
+function profileDependencies(profile) {
+  return [profile.modelID, ...(profile.loras || []).map(({ modelID }) => modelID)]
+    .filter((modelID, index, values) => modelID && values.indexOf(modelID) === index);
+}
+
+function profileLoRASummary(profile, models) {
+  const loras = profile.loras || [];
+  if (!loras.length) return t("lora.none");
+  return loras.map((lora) => {
+    const model = models.find(({ descriptor }) => descriptor.id === lora.modelID);
+    const name = model?.descriptor.displayName || lora.modelID;
+    const conditioning = lora.conditioning === "sourceImageCanny"
+      ? ` · ${t("profile.cannyControl")}`
+      : "";
+    return `${escapeHTML(name)} · ${Math.round(Number(lora.scale || 0) * 100)}%${conditioning}`;
+  }).join("<br>");
+}
+
+function renderProfileLoRARow(lora = {}) {
+  const scale = Number.isFinite(Number(lora.scale)) ? Number(lora.scale) : 1;
+  const conditioningScale = Number.isFinite(Number(lora.conditioningScale))
+    ? Number(lora.conditioningScale)
+    : 1;
+  return `<div class="profile-lora-row" data-profile-lora-row>
+    <label>${t("profile.loraModelID")}
+      <input class="field" data-profile-lora-field="modelID" value="${escapeHTML(lora.modelID || "")}" />
+    </label>
+    <label>${t("lora.scale")}
+      <input class="field" type="number" min="0" max="1" step="0.05" data-profile-lora-field="scale" value="${scale}" />
+    </label>
+    <label>${t("profile.loraConditioning")}
+      <select class="field" data-profile-lora-field="conditioning">
+        <option value="" ${lora.conditioning ? "" : "selected"}>${t("profile.noConditioning")}</option>
+        <option value="sourceImageCanny" ${lora.conditioning === "sourceImageCanny" ? "selected" : ""}>${t("profile.cannyControl")}</option>
+      </select>
+    </label>
+    <label>${t("profile.conditioningScale")}
+      <input class="field" type="number" min="0" max="1" step="0.05" data-profile-lora-field="conditioningScale" value="${conditioningScale}" />
+    </label>
+    <button type="button" class="danger-button compact" data-action="removeProfileLoRA">${t("profile.removeLoRA")}</button>
+  </div>`;
+}
+
+export function appendProfileLoRARow(button) {
+  const list = button.closest("[data-profile-card]")?.querySelector("[data-profile-lora-list]");
+  if (list) list.insertAdjacentHTML("beforeend", renderProfileLoRARow());
+}
+
+export function removeProfileLoRARow(button) {
+  button.closest("[data-profile-lora-row]")?.remove();
 }
 
 function defaultsSummary(defaults) {

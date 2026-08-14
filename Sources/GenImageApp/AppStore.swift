@@ -98,8 +98,8 @@ struct VideoOutputSettings: Codable, Hashable, Sendable {
     var seed: UInt64
 
     init(
-        width: Int = 704,
-        height: Int = 480,
+        width: Int = 1280,
+        height: Int = 720,
         steps: Int = 8,
         outputCount: Int = 1,
         frameCount: Int = 97,
@@ -245,8 +245,7 @@ final class AppStore: ObservableObject {
         installations = Self.installations(for: catalog)
         let initialRecipe = GenerationRecipe(
             name: "暖色城市夜景",
-            prompt: savedRecipeSettings?.prompt
-                ?? "雨後的台北巷弄，暖色霓虹倒映在地面，電影感構圖，細膩自然光影",
+            prompt: savedRecipeSettings?.prompt ?? "",
             negativePrompt: savedRecipeSettings?.negativePrompt ?? "模糊、低解析度、過度銳化",
             modelID: generationProfile.modelID,
             profileID: initialActiveProfileIDs[.textToImage],
@@ -424,8 +423,10 @@ final class AppStore: ObservableObject {
                       let profile = profiles.first(where: {
                           $0.capability == capability && profileSignature($0) == signature
                       }),
-                      models.contains(where: {
-                          $0.id == profile.modelID && $0.localURL != nil
+                      profile.requiredModelIDs.allSatisfy({ requiredModelID in
+                          models.contains(where: {
+                              $0.id == requiredModelID && $0.localURL != nil
+                          })
                       }) else { return nil }
                 return (capability, profile.id)
             }
@@ -459,8 +460,8 @@ final class AppStore: ObservableObject {
         defaults: ProfileDefaults
     ) -> VideoOutputSettings {
         VideoOutputSettings(
-            width: persistedDimension(saved?.width, fallback: defaults.width ?? 704),
-            height: persistedDimension(saved?.height, fallback: defaults.height ?? 480),
+            width: persistedDimension(saved?.width, fallback: defaults.width ?? 1280),
+            height: persistedDimension(saved?.height, fallback: defaults.height ?? 720),
             steps: persistedValue(saved?.steps, range: 1...100, fallback: defaults.steps ?? 8),
             outputCount: persistedValue(
                 saved?.outputCount,
@@ -625,14 +626,21 @@ final class AppStore: ObservableObject {
         return activeProfile(for: .textToVideo) ?? activeProfile(for: .imageToVideo)
     }
 
+    private func ensureInferenceIdle() -> Bool {
+        guard !jobs.contains(where: { [.queued, .running].contains($0.state) }) else {
+            statusMessage = "已有生成或辨識任務正在執行，請完成或取消後再開始新任務。"
+            return false
+        }
+        return true
+    }
+
     func selectProfile(_ profileID: UUID, for capability: ModelCapability) {
         guard let profile = profiles.first(where: { $0.id == profileID && $0.capability == capability }) else {
             return
         }
-        guard let model = models.first(where: { $0.id == profile.modelID }),
-              model.localURL != nil,
-              installation(for: profile.modelID).phase == .installed else {
-            statusMessage = "請先下載並驗證「\(profile.name)」使用的模型，完成後才能設為使用中。"
+        let missingModels = missingProfileModels(profile)
+        guard missingModels.isEmpty else {
+            statusMessage = "請先下載並驗證「\(profile.name)」的相關模型：\(missingModels.map(\.displayName).joined(separator: "、"))。"
             return
         }
         let previousProfileID = activeProfileIDs[capability]
@@ -653,7 +661,7 @@ final class AppStore: ObservableObject {
 
     private func deactivateProfiles(usingModelID modelID: String) {
         var changed = false
-        for profile in profiles where profile.modelID == modelID {
+        for profile in profiles where profile.requiredModelIDs.contains(modelID) {
             guard activeProfileIDs[profile.capability] == profile.id else { continue }
             activeProfileIDs[profile.capability] = nil
             disabledProfileIDs.insert(profile.id)
@@ -737,12 +745,7 @@ final class AppStore: ObservableObject {
     }
 
     func requestVideoGeneration() {
-        guard !jobs.contains(where: {
-            $0.action == .generateVideo && [.queued, .running].contains($0.state)
-        }) else {
-            statusMessage = "已有影片生成任務正在執行。"
-            return
-        }
+        guard ensureInferenceIdle() else { return }
         guard let profile = preferredVideoProfile else {
             statusMessage = "請先啟用文生影或圖生影 Profile。"
             return
@@ -766,6 +769,7 @@ final class AppStore: ObservableObject {
             statusMessage = "找不到影片模型的本機安裝路徑。"
             return
         }
+        guard let profileLoRAs = resolvedVideoLoRAs(for: profile) else { return }
 
         let options = VideoGenerationOptions(
             prompt: recipe.prompt,
@@ -793,7 +797,10 @@ final class AppStore: ObservableObject {
                 : "生成 \(options.outputCount) 部影片"
         )
         jobs.append(job)
-        updateJob(job.id) { $0.state = .running }
+        updateJob(job.id) {
+            $0.state = .running
+            $0.progress = 0.001
+        }
         let service = videoGenerationService
         let request = VideoGenerationRequest(
             projectID: projectID,
@@ -801,17 +808,20 @@ final class AppStore: ObservableObject {
             sourceAsset: sourceAsset,
             options: options,
             profile: profile,
-            modelURL: modelURL
+            modelURL: modelURL,
+            profileLoRAs: profileLoRAs
         )
 
-        jobTasks[job.id] = Task { @MainActor [weak self] in
-            guard let self else { return }
+        let jobID = job.id
+        let videoTask = Task.detached(priority: .userInitiated) { [weak self] in
             do {
                 var newAssets = try await service.generate(
                     request: request,
                     progress: { [weak self] value in
                         Task { @MainActor [weak self] in
-                            self?.updateJob(job.id) { $0.progress = value }
+                            self?.updateJob(jobID) {
+                                $0.progress = max($0.progress, min(1, max(0, value)))
+                            }
                         }
                     }
                 )
@@ -821,36 +831,73 @@ final class AppStore: ObservableObject {
                 for index in newAssets.indices {
                     newAssets[index].operationID = operationID
                 }
-                assets.append(contentsOf: newAssets)
-                operations.append(
-                    WorkflowOperation(
-                        id: operationID,
-                        projectID: projectID,
-                        action: .generateVideo,
-                        inputAssetID: sourceAsset?.id,
-                        outputAssetIDs: newAssets.map(\.id),
-                        recipeID: recipeID,
-                        profileSnapshot: profile
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    assets.append(contentsOf: newAssets)
+                    operations.append(
+                        WorkflowOperation(
+                            id: operationID,
+                            projectID: projectID,
+                            action: .generateVideo,
+                            inputAssetID: sourceAsset?.id,
+                            outputAssetIDs: newAssets.map(\.id),
+                            recipeID: recipeID,
+                            profileSnapshot: profile
+                        )
                     )
-                )
-                comparisonAssetID = nil
-                selectedAssetID = newAssets.first?.id
-                previewMode = .single
-                updateJob(job.id) {
-                    $0.progress = 1
-                    $0.state = .completed
+                    comparisonAssetID = nil
+                    selectedAssetID = newAssets.first?.id
+                    previewMode = .single
+                    updateJob(jobID) {
+                        $0.progress = 1
+                        $0.state = .completed
+                    }
+                    statusMessage = profile.capability == .imageToVideo
+                        ? "圖生影完成。"
+                        : "文生影完成。"
                 }
-                statusMessage = profile.capability == .imageToVideo
-                    ? "圖生影完成。"
-                    : "文生影完成。"
             } catch is CancellationError {
-                updateJob(job.id) { $0.state = .cancelled }
+                await MainActor.run { [weak self] in
+                    guard let self,
+                          jobs.first(where: { $0.id == jobID })?.state == .running else {
+                        return
+                    }
+                    updateJob(jobID) { $0.state = .cancelled }
+                }
             } catch {
-                updateJob(job.id) { $0.state = .failed }
-                statusMessage = "影片生成失敗：\(error.localizedDescription)"
+                let message = error.localizedDescription
+                await MainActor.run { [weak self] in
+                    guard let self,
+                          jobs.first(where: { $0.id == jobID })?.state == .running else {
+                        return
+                    }
+                    updateJob(jobID) { $0.state = .failed }
+                    statusMessage = "影片生成失敗：\(message)"
+                }
             }
-            jobTasks[job.id] = nil
+            await MainActor.run { [weak self] in
+                self?.jobTasks[jobID] = nil
+            }
         }
+        jobTasks[jobID] = videoTask
+
+        Task.detached(priority: .utility) { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled else { return }
+            await self?.failVideoJobIfStartupStalled(jobID)
+        }
+    }
+
+    private func failVideoJobIfStartupStalled(_ jobID: UUID) {
+        guard let job = jobs.first(where: { $0.id == jobID }),
+              job.state == .running,
+              job.progress < 0.01 else {
+            return
+        }
+        jobTasks[jobID]?.cancel()
+        jobTasks[jobID] = nil
+        updateJob(jobID) { $0.state = .failed }
+        statusMessage = "影片生成 Runtime 在 15 秒內未啟動，任務已自動停止；請重新執行。"
     }
 
     func chooseSize(width: Int, height: Int) {
@@ -927,12 +974,7 @@ final class AppStore: ObservableObject {
     }
 
     func describeSelected() {
-        guard !jobs.contains(where: {
-            $0.action == .describe && [.queued, .running].contains($0.state)
-        }) else {
-            statusMessage = "已有圖生文任務正在執行。"
-            return
-        }
+        guard ensureInferenceIdle() else { return }
         guard let input = selectedSourceImage else {
             statusMessage = "請先匯入或選取一張圖片。"
             return
@@ -992,12 +1034,7 @@ final class AppStore: ObservableObject {
     }
 
     func generate(linkToSelectedAsset: Bool = false) {
-        guard !jobs.contains(where: {
-            $0.action == .describe && [.queued, .running].contains($0.state)
-        }) else {
-            statusMessage = "圖生文執行中，完成後才能生成圖片。"
-            return
-        }
+        guard ensureInferenceIdle() else { return }
         do {
             try recipe.validate()
         } catch {
@@ -1073,6 +1110,7 @@ final class AppStore: ObservableObject {
     }
 
     func imageToImageSelected() {
+        guard ensureInferenceIdle() else { return }
         guard let input = selectedSourceImage else {
             statusMessage = "請先匯入或選取一張圖片。"
             return
@@ -1182,6 +1220,7 @@ final class AppStore: ObservableObject {
     }
 
     func upscaleSelected() {
+        guard ensureInferenceIdle() else { return }
         guard let input = selectedSourceImage else {
             statusMessage = "請先匯入或選取一張圖片。"
             return
@@ -1245,11 +1284,12 @@ final class AppStore: ObservableObject {
     }
 
     func cancelJob(_ id: UUID) {
-        jobTasks[id]?.cancel()
-        jobTasks[id] = nil
-        updateJob(id) {
-            $0.state = .cancelled
+        guard let task = jobTasks[id] else {
+            updateJob(id) { $0.state = .cancelled }
+            return
         }
+        task.cancel()
+        statusMessage = "正在取消任務，Runtime 停止後即可開始下一個任務。"
     }
 
     func clearFinishedJobs() {
@@ -1258,6 +1298,28 @@ final class AppStore: ObservableObject {
 
     func installation(for modelID: String) -> ModelInstallation {
         installations[modelID] ?? ModelInstallation()
+    }
+
+    func installProfileModels(_ profileID: UUID) {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
+        let requiredModels = profile.requiredModelIDs.compactMap { requiredModelID in
+            models.first { $0.id == requiredModelID }
+        }
+        guard requiredModels.count == profile.requiredModelIDs.count else {
+            let knownIDs = Set(requiredModels.map(\.id))
+            let missingIDs = profile.requiredModelIDs.filter { !knownIDs.contains($0) }
+            statusMessage = "找不到 Profile 的相關模型：\(missingIDs.joined(separator: "、"))"
+            return
+        }
+
+        var startedCount = 0
+        for model in requiredModels where installation(for: model.id).phase != .installed {
+            installModel(model)
+            startedCount += 1
+        }
+        statusMessage = startedCount > 0
+            ? "已開始下載「\(profile.name)」所需的 \(startedCount) 個相關模型；已安裝項目會自動去重。"
+            : "「\(profile.name)」的相關模型皆已安裝。"
     }
 
     func installModel(_ model: ModelDescriptor) {
@@ -1443,6 +1505,7 @@ final class AppStore: ObservableObject {
             modelRevision: profile.modelRevision,
             architecture: profile.architecture,
             defaults: profile.defaults,
+            loras: profile.loras,
             profileRevision: 1,
             notes: profile.notes,
             isBuiltIn: false
@@ -1489,6 +1552,7 @@ final class AppStore: ObservableObject {
             modelID: modelID,
             architecture: architecture,
             defaults: defaults,
+            loras: isVideoCapability ? (templateProfile?.loras ?? []) : [],
             notes: capability == .imageToImage || isVideoCapability
                 ? "請設定支援此生成能力的模型版本與推論架構。"
                 : "",
@@ -1503,9 +1567,21 @@ final class AppStore: ObservableObject {
         name: String,
         modelID: String,
         modelRevision: String,
-        architecture: InferenceArchitecture
+        architecture: InferenceArchitecture,
+        loras: [ProfileLoRAConfiguration]
     ) {
         guard let index = profiles.firstIndex(where: { $0.id == id }), !profiles[index].isBuiltIn else {
+            return
+        }
+
+        guard loras.allSatisfy({ configuration in
+            !configuration.modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && configuration.scale.isFinite
+                && (0...1).contains(configuration.scale)
+                && configuration.conditioningScale.isFinite
+                && (0...1).contains(configuration.conditioningScale)
+        }) else {
+            statusMessage = "LoRA 模型 ID 不可空白，權重與控制強度必須介於 0 到 1。"
             return
         }
 
@@ -1513,15 +1589,13 @@ final class AppStore: ObservableObject {
         profiles[index].modelID = modelID
         profiles[index].modelRevision = modelRevision
         profiles[index].architecture = architecture
+        profiles[index].loras = loras
         profiles[index].profileRevision += 1
         Self.persistDisabledProfiles(disabledProfileIDs, in: profiles)
 
         let capability = profiles[index].capability
         if activeProfileIDs[capability] == id {
-            let isInstalled = models.contains {
-                $0.id == modelID && $0.localURL != nil
-                    && installation(for: modelID).phase == .installed
-            }
+            let isInstalled = missingProfileModels(profiles[index]).isEmpty
             if isInstalled {
                 if capability == .textToImage {
                     recipe.modelID = modelID
@@ -1547,11 +1621,7 @@ final class AppStore: ObservableObject {
             let replacement = profiles.first { candidate in
                 candidate.capability == profile.capability
                     && !disabledProfileIDs.contains(candidate.id)
-                    && models.contains(where: { model in
-                        model.id == candidate.modelID
-                            && model.localURL != nil
-                            && installation(for: model.id).phase == .installed
-                    })
+                    && missingProfileModels(candidate).isEmpty
             }
             activeProfileIDs[profile.capability] = replacement?.id
             if profile.capability == .textToImage {
@@ -1586,14 +1656,49 @@ final class AppStore: ObservableObject {
     }
 
     private func isProfileReady(_ profile: InferenceProfile) -> Bool {
-        guard let model = models.first(where: { $0.id == profile.modelID }) else {
-            return true
-        }
-        guard installation(for: model.id).phase == .installed else {
-            statusMessage = "請先到模型中心安裝「\(model.displayName)」。"
+        let missingModels = missingProfileModels(profile)
+        guard missingModels.isEmpty else {
+            statusMessage = "請先安裝 Profile 的相關模型：\(missingModels.map(\.displayName).joined(separator: "、"))。"
             return false
         }
         return true
+    }
+
+    private func missingProfileModels(_ profile: InferenceProfile) -> [ModelDescriptor] {
+        profile.requiredModelIDs.compactMap { requiredModelID in
+            guard let model = models.first(where: { $0.id == requiredModelID }) else {
+                return ModelDescriptor(
+                    id: requiredModelID,
+                    displayName: requiredModelID,
+                    publisher: "",
+                    summary: "",
+                    capabilities: [],
+                    quantization: .lora,
+                    approximateDownloadGB: 0,
+                    recommendedMemoryGB: 0,
+                    licenseName: ""
+                )
+            }
+            guard model.localURL != nil,
+                  installation(for: requiredModelID).phase == .installed else {
+                return model
+            }
+            return nil
+        }
+    }
+
+    private func resolvedVideoLoRAs(for profile: InferenceProfile) -> [VideoGenerationLoRA]? {
+        var result: [VideoGenerationLoRA] = []
+        for configuration in profile.loras {
+            guard let model = models.first(where: { $0.id == configuration.modelID }),
+                  let localURL = model.localURL,
+                  FileManager.default.fileExists(atPath: localURL.path) else {
+                statusMessage = "找不到 Profile LoRA 的本機檔案：\(configuration.modelID)"
+                return nil
+            }
+            result.append(VideoGenerationLoRA(configuration: configuration, localURL: localURL))
+        }
+        return result
     }
 
     private func runtimeProfile(from profile: InferenceProfile) -> InferenceProfile? {

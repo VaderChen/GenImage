@@ -26,6 +26,12 @@ const aspectRatios = [
   { label: "16:9", width: 16, height: 9 },
 ];
 
+const jobTimingEstimators = new Map();
+const ETA_SAMPLE_WINDOW_MS = 3 * 60 * 1_000;
+const ETA_MIN_SAMPLE_SPAN_MS = 5_000;
+const ETA_MIN_PROGRESS_DELTA = 0.001;
+const ETA_MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1_000;
+
 export function renderWorkspace(state, ui) {
   return `
     <section class="workspace-shell">
@@ -83,8 +89,8 @@ export function renderQuickTools(state) {
 function renderCreationPanel(state, ui) {
   const recipe = state.recipe;
   const videoOutputSettings = state.videoOutputSettings || {
-    width: 704,
-    height: 480,
+    width: 1280,
+    height: 720,
     steps: 8,
     outputCount: 1,
     frameCount: 97,
@@ -93,7 +99,8 @@ function renderCreationPanel(state, ui) {
   };
   const collapsed = ui.creationCollapsed;
   const descriptionBusy = isImageDescriptionBusy(state);
-  const videoBusy = isVideoGenerationBusy(state);
+  const inferenceBusy = isInferenceBusy(state);
+  const inferenceDisabledAttribute = inferenceBusy ? "disabled aria-busy=\"true\"" : "";
   const promptTab = ["negative", "imageOutput", "videoOutput"].includes(ui.promptTab)
     ? ui.promptTab
     : "prompt";
@@ -117,7 +124,7 @@ function renderCreationPanel(state, ui) {
             ? `<button
                 class="secondary-button creation-generate-button"
                 data-action="describe"
-                ${descriptionBusy ? "disabled" : ""}
+                ${inferenceDisabledAttribute}
               >⌕ ${t("workspace.generateText")}</button>`
             : ""
         }
@@ -126,7 +133,7 @@ function renderCreationPanel(state, ui) {
             ? `<button
                 class="${showGenerateImage ? "secondary-button" : "primary-button"} creation-generate-button"
                 data-action="generateVideo"
-                ${descriptionBusy || videoBusy ? "disabled" : ""}
+                ${inferenceDisabledAttribute}
               >▶ ${t("workspace.generateVideo")}</button>`
             : ""
         }
@@ -135,7 +142,7 @@ function renderCreationPanel(state, ui) {
             ? `<button
                 class="primary-button creation-generate-button"
                 data-action="generate"
-                ${descriptionBusy ? "disabled" : ""}
+                ${inferenceDisabledAttribute}
               >✦ ${t("workspace.generate")}</button>`
             : ""
         }
@@ -393,7 +400,11 @@ function renderQuickTool(state, capability) {
 }
 
 function renderLoRAControl(state) {
-  const loras = Array.isArray(state.loras) ? state.loras : [];
+  const loras = Array.isArray(state.loras)
+    ? state.loras.filter((lora) =>
+      !Array.isArray(lora.compatibleCapabilities)
+        || lora.compatibleCapabilities.includes("textToImage"))
+    : [];
   const selectedID = state.recipe.loraID || "";
   const scale = Number.isFinite(Number(state.recipe.loraScale))
     ? Math.min(1, Math.max(0, Number(state.recipe.loraScale)))
@@ -564,15 +575,13 @@ function renderFilmstrip(state) {
   </div>`;
 }
 
+export function isInferenceBusy(state) {
+  return state.jobs.some((job) => ["queued", "running"].includes(job.state));
+}
+
 function isImageDescriptionBusy(state) {
   return state.jobs.some((job) =>
     job.action === "describe" && ["queued", "running"].includes(job.state),
-  );
-}
-
-function isVideoGenerationBusy(state) {
-  return state.jobs.some((job) =>
-    job.action === "generateVideo" && ["queued", "running"].includes(job.state),
   );
 }
 
@@ -613,6 +622,9 @@ function renderAssetInspector(state) {
   const lineage = buildLineage(state.assets, asset);
   const isVideo = asset.kind === "generatedVideo";
   const canEdit = !isVideo && hasActiveProfile(state, "imageToImage");
+  const inferenceDisabledAttribute = isInferenceBusy(state)
+    ? "disabled aria-busy=\"true\""
+    : "";
   return `
     <div class="inspector-scroll" data-scroll-id="inspector-info">
       <div class="section-heading"><h2>${escapeHTML(asset.title)}</h2></div>
@@ -621,9 +633,9 @@ function renderAssetInspector(state) {
         isVideo
           ? ""
           : `<div class="inspector-actions">
-              <button class="secondary-button compact" data-action="describe">⌕ ${t("inspector.caption")}</button>
-              ${canEdit ? `<button class="secondary-button compact" data-action="imageToImage">▧ ${t("cap.imageToImage")}</button>` : ""}
-              <button class="secondary-button compact" data-action="upscale">↗ ${t("inspector.upscale")}</button>
+              <button class="secondary-button compact" data-action="describe" ${inferenceDisabledAttribute}>⌕ ${t("inspector.caption")}</button>
+              ${canEdit ? `<button class="secondary-button compact" data-action="imageToImage" ${inferenceDisabledAttribute}>▧ ${t("cap.imageToImage")}</button>` : ""}
+              <button class="secondary-button compact" data-action="upscale" ${inferenceDisabledAttribute}>↗ ${t("inspector.upscale")}</button>
             </div>`
       }
       <div class="inspector-group">
@@ -693,6 +705,12 @@ function renderJob(job) {
 }
 
 export function refreshJobTimings(state, container = document) {
+  const runningJobIDs = new Set(
+    state.jobs.filter((job) => job.state === "running").map((job) => job.id),
+  );
+  jobTimingEstimators.forEach((_, jobID) => {
+    if (!runningJobIDs.has(jobID)) jobTimingEstimators.delete(jobID);
+  });
   const jobsByID = new Map(state.jobs.map((job) => [job.id, job]));
   container.querySelectorAll("[data-job-timing]").forEach((element) => {
     const job = jobsByID.get(element.dataset.jobTiming);
@@ -704,17 +722,100 @@ function jobTimingSuffix(job, now = Date.now()) {
   const startedAt = parseTimestamp(job.startedAt);
   if (job.state === "running") {
     const progress = Math.min(1, Math.max(0, Number(job.progress) || 0));
-    const elapsed = startedAt === null ? 0 : Math.max(0, now - startedAt);
-    const remaining = progress > 0 ? elapsed * (1 - progress) / progress : null;
-    const time = remaining === null ? "--:--" : formatDuration(remaining, true);
+    const remaining = estimateRemainingTime(job, progress, startedAt, now);
+    const time = remaining === null ? t("job.estimating") : formatDuration(remaining, true);
     return ` · ${t("job.estimatedRemaining", { time })}`;
   }
+  jobTimingEstimators.delete(job.id);
   if (job.state === "completed") {
     const finishedAt = parseTimestamp(job.finishedAt);
     if (startedAt === null || finishedAt === null) return "";
     return ` · ${t("job.generationTime", { time: formatDuration(finishedAt - startedAt) })}`;
   }
   return "";
+}
+
+function estimateRemainingTime(job, progress, startedAt, now) {
+  if (startedAt === null || progress <= 0 || progress >= 1) return null;
+  let estimator = jobTimingEstimators.get(job.id);
+  if (!estimator || estimator.startedAt !== startedAt || progress < estimator.progress) {
+    estimator = {
+      startedAt,
+      progress: 0,
+      lastProgressAt: startedAt,
+      samples: [{ time: startedAt, progress: 0 }],
+      rate: null,
+      finishAt: null,
+    };
+    jobTimingEstimators.set(job.id, estimator);
+  }
+
+  if (progress - estimator.progress >= ETA_MIN_PROGRESS_DELTA) {
+    recordProgressSample(estimator, progress, now);
+  }
+  if (!Number.isFinite(estimator.finishAt)) return null;
+
+  const updateIntervals = estimator.samples.slice(1).map((sample, index) =>
+    sample.time - estimator.samples[index].time,
+  ).filter((duration) => duration > 0);
+  const typicalInterval = median(updateIntervals) ?? 15_000;
+  const staleLimit = Math.min(3 * 60 * 1_000, Math.max(30_000, typicalInterval * 3));
+  if (now - estimator.lastProgressAt > staleLimit) return null;
+
+  const remaining = estimator.finishAt - now;
+  return remaining > 0 && remaining <= ETA_MAX_DURATION_MS ? remaining : null;
+}
+
+function recordProgressSample(estimator, progress, now) {
+  const lastSample = estimator.samples.at(-1);
+  if (lastSample && now - lastSample.time < 1_000 && estimator.samples.length > 1) {
+    lastSample.progress = progress;
+  } else {
+    estimator.samples.push({ time: now, progress });
+  }
+  estimator.progress = progress;
+  estimator.lastProgressAt = now;
+
+  const cutoff = now - ETA_SAMPLE_WINDOW_MS;
+  while (estimator.samples.length > 2 && estimator.samples[1].time < cutoff) {
+    estimator.samples.shift();
+  }
+  if (estimator.samples.length > 32) {
+    estimator.samples.splice(0, estimator.samples.length - 32);
+  }
+
+  const rates = [];
+  for (let currentIndex = 1; currentIndex < estimator.samples.length; currentIndex += 1) {
+    const current = estimator.samples[currentIndex];
+    for (let previousIndex = 0; previousIndex < currentIndex; previousIndex += 1) {
+      const previous = estimator.samples[previousIndex];
+      const duration = current.time - previous.time;
+      const completed = current.progress - previous.progress;
+      if (duration >= ETA_MIN_SAMPLE_SPAN_MS && completed > 0) {
+        rates.push(completed / duration);
+      }
+    }
+  }
+  const measuredRate = median(rates);
+  if (!Number.isFinite(measuredRate) || measuredRate <= 0) return;
+
+  if (Number.isFinite(estimator.rate)) {
+    const boundedRate = Math.min(estimator.rate * 4, Math.max(estimator.rate / 4, measuredRate));
+    estimator.rate = estimator.rate * 0.65 + boundedRate * 0.35;
+  } else {
+    estimator.rate = measuredRate;
+  }
+  const remaining = (1 - progress) / estimator.rate;
+  estimator.finishAt = now + remaining;
+}
+
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
 }
 
 function parseTimestamp(value) {
