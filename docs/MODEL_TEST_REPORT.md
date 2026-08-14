@@ -1,5 +1,7 @@
 # 本機模型測試報告
 
+繁體中文 | [English](MODEL_TEST_REPORT.en.md) | [日本語](MODEL_TEST_REPORT.ja.md) | [한국어](MODEL_TEST_REPORT.ko.md)
+
 測試日期：2026-08-03
 測試平台：Apple M4、macOS、Xcode 26.6、Swift 6.3
 

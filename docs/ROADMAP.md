@@ -1,5 +1,7 @@
 # 開發路線
 
+繁體中文 | [English](ROADMAP.en.md) | [日本語](ROADMAP.ja.md) | [한국어](ROADMAP.ko.md)
+
 ## 已完成：Foundation
 
 - Swift Package 與 macOS 14+ 應用程式入口。

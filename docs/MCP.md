@@ -1,5 +1,7 @@
 # GenImage MCP Server
 
+繁體中文 | [English](MCP.en.md) | [日本語](MCP.ja.md) | [한국어](MCP.ko.md)
+
 GenImage 提供 JSON-RPC 2.0 stdio MCP server，協定版本 `2025-06-18`。
 
 ## 啟動

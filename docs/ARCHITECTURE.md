@@ -1,5 +1,7 @@
 # GenImage 架構
 
+繁體中文 | [English](ARCHITECTURE.en.md) | [日本語](ARCHITECTURE.ja.md) | [한국어](ARCHITECTURE.ko.md)
+
 ## 設計目標
 
 1. 文生圖、圖生文、圖生圖、影片生成與 Upscale 是獨立能力，不互相依賴。

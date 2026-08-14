@@ -112,11 +112,11 @@ Sources/
 
 詳細情報：
 
-- [アーキテクチャ](docs/ARCHITECTURE.md)
-- [Web Bridge](docs/WEB_BRIDGE.md)
-- [ロードマップ](docs/ROADMAP.md)
-- [MCP インターフェース](docs/MCP.md)
-- [ローカルモデルテスト報告](docs/MODEL_TEST_REPORT.md)
+- [アーキテクチャ](docs/ARCHITECTURE.ja.md)
+- [Web Bridge](docs/WEB_BRIDGE.ja.md)
+- [ロードマップ](docs/ROADMAP.ja.md)
+- [MCP インターフェース](docs/MCP.ja.md)
+- [ローカルモデルテスト報告](docs/MODEL_TEST_REPORT.ja.md)
 
 ## ライセンス
 

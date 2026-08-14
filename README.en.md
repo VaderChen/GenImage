@@ -112,11 +112,11 @@ Remote downloads in Model Center currently provide the UI workflow foundation. P
 
 More information:
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Web Bridge](docs/WEB_BRIDGE.md)
-- [Roadmap](docs/ROADMAP.md)
-- [MCP Interface](docs/MCP.md)
-- [Local Model Test Report](docs/MODEL_TEST_REPORT.md)
+- [Architecture](docs/ARCHITECTURE.en.md)
+- [Web Bridge](docs/WEB_BRIDGE.en.md)
+- [Roadmap](docs/ROADMAP.en.md)
+- [MCP Interface](docs/MCP.en.md)
+- [Local Model Test Report](docs/MODEL_TEST_REPORT.en.md)
 
 ## License
 

@@ -1,5 +1,7 @@
 # Web Bridge
 
+繁體中文 | [English](WEB_BRIDGE.en.md) | [日本語](WEB_BRIDGE.ja.md) | [한국어](WEB_BRIDGE.ko.md)
+
 ## 原則
 
 - JavaScript 只傳送 JSON 相容資料。

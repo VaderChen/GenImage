@@ -112,11 +112,11 @@ Sources/
 
 추가 정보:
 
-- [아키텍처](docs/ARCHITECTURE.md)
-- [Web Bridge](docs/WEB_BRIDGE.md)
-- [로드맵](docs/ROADMAP.md)
-- [MCP 인터페이스](docs/MCP.md)
-- [로컬 모델 테스트 보고서](docs/MODEL_TEST_REPORT.md)
+- [아키텍처](docs/ARCHITECTURE.ko.md)
+- [Web Bridge](docs/WEB_BRIDGE.ko.md)
+- [로드맵](docs/ROADMAP.ko.md)
+- [MCP 인터페이스](docs/MCP.ko.md)
+- [로컬 모델 테스트 보고서](docs/MODEL_TEST_REPORT.ko.md)
 
 ## 라이선스
 
