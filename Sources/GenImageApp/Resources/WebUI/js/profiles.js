@@ -1,0 +1,150 @@
+import { architectureLabel, capabilityLabel, escapeHTML } from "./format.js";
+import { t } from "./i18n.js";
+
+const primaryCapabilities = ["imageToText", "textToImage", "imageToImage", "textToVideo", "imageToVideo", "upscale"];
+
+export function renderProfiles(state) {
+  return `
+    <section class="page">
+      <header class="page-header">
+        <div class="page-header-copy">
+          <h1>${t("profile.title")}</h1>
+          <p>${t("profile.subtitle")}</p>
+        </div>
+        <div class="button-row">
+          ${primaryCapabilities
+            .map(
+              (capability) => `<button class="secondary-button compact" data-action="createProfile" data-capability="${capability}">＋ ${t("profile.create", { capability: capabilityLabel(capability) })}</button>`,
+            )
+            .join("")}
+        </div>
+      </header>
+      <div class="page-scroll" data-scroll-id="profiles">
+        ${primaryCapabilities.map((capability) => renderProfileSection(state, capability)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderProfileSection(state, capability) {
+  const profiles = state.profiles.filter((profile) => profile.capability === capability);
+  const activeID = state.activeProfileIDs[capability];
+  const disabledProfileIDs = new Set(state.disabledProfileIDs || []);
+  return `
+    <section style="margin-bottom:28px">
+      <div class="section-heading">
+        <h2>${capabilityLabel(capability)}</h2>
+        <span class="section-note">${t("profile.count", { count: profiles.length })}</span>
+      </div>
+      <div class="card-grid">
+        ${profiles
+          .map((profile) =>
+            renderProfileCard(
+              profile,
+              profile.id === activeID,
+              disabledProfileIDs.has(profile.id),
+              state.models,
+            ),
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderProfileCard(profile, isActive, isDisabled, models) {
+  return `
+    <article class="profile-card" data-profile-card="${profile.id}">
+      <div class="card-title-row">
+        <div>
+          <h2>${escapeHTML(profile.name)}</h2>
+          <p>${capabilityLabel(profile.capability)} · r${profile.profileRevision}</p>
+        </div>
+        ${isActive ? `<span class="badge active">${t("common.active")}</span>` : ""}
+        ${isDisabled ? `<span class="badge">${t("profile.disabled")}</span>` : ""}
+        ${profile.isBuiltIn ? `<span class="badge">${t("common.builtIn")}</span>` : ""}
+      </div>
+      <p>${escapeHTML(profile.notes || t("profile.noNotes"))}</p>
+      <div class="profile-meta">
+        <span>${t("profile.engine")}</span><strong>${architectureLabel(profile.architecture)}</strong>
+        <span>${t("profile.model")}</span><strong title="${escapeHTML(profile.modelID)}">${escapeHTML(profile.modelID)}</strong>
+        <span>${t("profile.modelRevision")}</span><strong>${escapeHTML(profile.modelRevision)}</strong>
+        <span>${t("profile.defaults")}</span><strong>${defaultsSummary(profile.defaults)}</strong>
+      </div>
+      ${profile.isBuiltIn ? renderBuiltInActions(profile, isActive, models) : renderProfileForm(profile, isActive, models)}
+    </article>
+  `;
+}
+
+function renderBuiltInActions(profile, isActive, models) {
+  return `<div class="button-row">
+    ${renderActivationButton(profile, isActive, models)}
+    <button class="secondary-button compact" data-action="duplicateProfile" data-profile-id="${profile.id}">${t("profile.duplicate")}</button>
+    ${renderModelInstallButton(profile, models)}
+  </div>`;
+}
+
+function renderActivationButton(profile, isActive, models = []) {
+  if (isActive) {
+    return `<button class="danger-button compact" data-action="deactivateProfile" data-profile-id="${profile.id}" data-capability="${profile.capability}">${t("profile.deactivate")}</button>`;
+  }
+  const model = models.find(({ descriptor }) => descriptor.id === profile.modelID);
+  const isInstalled = model?.installation.phase === "installed";
+  return `<button class="primary-button compact" data-action="activateProfile" data-profile-id="${profile.id}" data-capability="${profile.capability}" ${isInstalled ? "" : `disabled title="${escapeHTML(t("profile.installRequired"))}"`}>${t("profile.activate")}</button>`;
+}
+
+function renderProfileForm(profile, isActive, models) {
+  const architectures = ["mlxSwift", "coreML", "localService", "externalCLI"];
+  return `
+    <div class="profile-form">
+      <label>${t("profile.name")}
+        <input class="field" data-profile-field="name" value="${escapeHTML(profile.name)}" />
+      </label>
+      <label>${t("profile.modelID")}
+        <input class="field" data-profile-field="modelID" value="${escapeHTML(profile.modelID)}" />
+      </label>
+      <label>${t("profile.revision")}
+        <input class="field" data-profile-field="modelRevision" value="${escapeHTML(profile.modelRevision)}" />
+      </label>
+      <label>${t("profile.engine")}
+        <select class="field" data-profile-field="architecture">
+          ${architectures
+            .map((architecture) => `<option value="${architecture}" ${architecture === profile.architecture ? "selected" : ""}>${architectureLabel(architecture)}</option>`)
+            .join("")}
+        </select>
+      </label>
+    </div>
+    <div class="button-row">
+      <button class="primary-button compact" data-action="saveProfile" data-profile-id="${profile.id}">${t("profile.save")}</button>
+      ${renderActivationButton(profile, isActive, models)}
+      ${renderModelInstallButton(profile, models)}
+      <button class="danger-button compact" data-action="deleteProfile" data-profile-id="${profile.id}">${t("profile.delete")}</button>
+    </div>
+  `;
+}
+
+function renderModelInstallButton(profile, models = []) {
+  const model = models.find(({ descriptor }) => descriptor.id === profile.modelID);
+  if (!model) return "";
+
+  const phase = model.installation.phase;
+  if (phase === "installed") {
+    return `<button class="secondary-button compact" disabled>${t("phase.installed")}</button>`;
+  }
+  if (["queued", "downloading", "verifying"].includes(phase)) {
+    return `<button class="secondary-button compact" disabled>${t(`phase.${phase}`)}</button>`;
+  }
+  const label = phase === "paused" ? t("model.resume") : t("model.install");
+  return `<button class="install-button compact" data-action="installModel" data-model-id="${escapeHTML(model.descriptor.id)}">${label}</button>`;
+}
+
+function defaultsSummary(defaults) {
+  if (defaults.frameCount) {
+    const resolution = defaults.width && defaults.height ? `${defaults.width}×${defaults.height} · ` : "";
+    return `${resolution}${defaults.frameRate || "–"} FPS · ${defaults.frameCount} frames · ${defaults.steps || "–"} steps`;
+  }
+  if (defaults.width && defaults.height) return `${defaults.width}×${defaults.height} · ${defaults.steps || "–"} steps`;
+  if (defaults.languageCode) return `${defaults.languageCode} · ${defaults.maxTokens || "–"} tokens`;
+  if (defaults.upscaleScale) return `${defaults.upscaleScale}× · tile ${defaults.tileSize || "auto"}`;
+  return t("profile.custom");
+}

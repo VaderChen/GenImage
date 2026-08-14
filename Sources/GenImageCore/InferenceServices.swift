@@ -1,0 +1,232 @@
+import Foundation
+
+public struct TextToImageRequest: Sendable, Hashable {
+    public var projectID: UUID
+    public var recipe: GenerationRecipe
+    public var profile: InferenceProfile
+    public var sourceAsset: ImageAsset?
+
+    public init(
+        projectID: UUID,
+        recipe: GenerationRecipe,
+        profile: InferenceProfile,
+        sourceAsset: ImageAsset? = nil
+    ) {
+        self.projectID = projectID
+        self.recipe = recipe
+        self.profile = profile
+        self.sourceAsset = sourceAsset
+    }
+}
+
+public struct ImageDescriptionRequest: Sendable, Hashable {
+    public var asset: ImageAsset
+    public var profile: InferenceProfile
+    public var languageCode: String
+
+    public init(
+        asset: ImageAsset,
+        profile: InferenceProfile,
+        languageCode: String = "zh-Hant"
+    ) {
+        self.asset = asset
+        self.profile = profile
+        self.languageCode = languageCode
+    }
+}
+
+public struct ImageToImageRequest: Sendable, Hashable {
+    public var projectID: UUID
+    public var sourceAsset: ImageAsset
+    public var recipe: GenerationRecipe
+    public var profile: InferenceProfile
+    public var modelURL: URL
+    public var quantization: ModelQuantization
+
+    public init(
+        projectID: UUID,
+        sourceAsset: ImageAsset,
+        recipe: GenerationRecipe,
+        profile: InferenceProfile,
+        modelURL: URL,
+        quantization: ModelQuantization
+    ) {
+        self.projectID = projectID
+        self.sourceAsset = sourceAsset
+        self.recipe = recipe
+        self.profile = profile
+        self.modelURL = modelURL
+        self.quantization = quantization
+    }
+}
+
+public struct UpscaleRequest: Sendable, Hashable {
+    public var asset: ImageAsset
+    public var profile: InferenceProfile
+    public var scale: Int
+
+    public init(asset: ImageAsset, profile: InferenceProfile, scale: Int = 4) {
+        self.asset = asset
+        self.profile = profile
+        self.scale = scale
+    }
+}
+
+public struct VideoGenerationOptions: Sendable, Hashable {
+    public var prompt: String
+    public var width: Int
+    public var height: Int
+    public var steps: Int
+    public var outputCount: Int
+    public var frameCount: Int
+    public var frameRate: Int
+    public var seed: UInt64
+
+    public init(
+        prompt: String,
+        width: Int,
+        height: Int,
+        steps: Int,
+        outputCount: Int,
+        frameCount: Int,
+        frameRate: Int,
+        seed: UInt64
+    ) {
+        self.prompt = prompt
+        self.width = width
+        self.height = height
+        self.steps = steps
+        self.outputCount = outputCount
+        self.frameCount = frameCount
+        self.frameRate = frameRate
+        self.seed = seed
+    }
+
+    public func validate() throws {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw VideoGenerationValidationError.emptyPrompt
+        }
+        guard (64...4096).contains(width), (64...4096).contains(height) else {
+            throw VideoGenerationValidationError.invalidDimensions
+        }
+        guard width.isMultiple(of: 16), height.isMultiple(of: 16) else {
+            throw VideoGenerationValidationError.dimensionsMustBeMultiplesOf16
+        }
+        guard (1...100).contains(steps) else {
+            throw VideoGenerationValidationError.invalidSteps
+        }
+        guard (1...8).contains(outputCount) else {
+            throw VideoGenerationValidationError.invalidOutputCount
+        }
+        guard (1...512).contains(frameCount) else {
+            throw VideoGenerationValidationError.invalidFrameCount
+        }
+        guard (1...120).contains(frameRate) else {
+            throw VideoGenerationValidationError.invalidFrameRate
+        }
+    }
+}
+
+public enum VideoGenerationValidationError: LocalizedError, Sendable {
+    case emptyPrompt
+    case invalidDimensions
+    case dimensionsMustBeMultiplesOf16
+    case invalidSteps
+    case invalidOutputCount
+    case invalidFrameCount
+    case invalidFrameRate
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyPrompt: "Prompt 不可為空白。"
+        case .invalidDimensions: "影片寬高必須介於 64 到 4096。"
+        case .dimensionsMustBeMultiplesOf16: "影片寬高必須是 16 的倍數。"
+        case .invalidSteps: "影片生成步數必須介於 1 到 100。"
+        case .invalidOutputCount: "影片生成數量必須介於 1 到 8。"
+        case .invalidFrameCount: "影片幀數必須介於 1 到 512。"
+        case .invalidFrameRate: "影片幀率必須介於 1 到 120 FPS。"
+        }
+    }
+}
+
+public struct VideoGenerationRequest: Sendable, Hashable {
+    public var projectID: UUID
+    public var recipeID: UUID
+    public var sourceAsset: ImageAsset?
+    public var options: VideoGenerationOptions
+    public var profile: InferenceProfile
+    public var modelURL: URL
+
+    public init(
+        projectID: UUID,
+        recipeID: UUID,
+        sourceAsset: ImageAsset?,
+        options: VideoGenerationOptions,
+        profile: InferenceProfile,
+        modelURL: URL
+    ) {
+        self.projectID = projectID
+        self.recipeID = recipeID
+        self.sourceAsset = sourceAsset
+        self.options = options
+        self.profile = profile
+        self.modelURL = modelURL
+    }
+}
+
+public protocol TextToImageGenerating: Sendable {
+    func generate(
+        request: TextToImageRequest,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> [ImageAsset]
+}
+
+public protocol ImageDescribing: Sendable {
+    func describe(
+        request: ImageDescriptionRequest,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> String
+}
+
+public protocol ImageToImageGenerating: Sendable {
+    func generate(
+        request: ImageToImageRequest,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> ImageAsset
+}
+
+public protocol ImageUpscaling: Sendable {
+    func upscale(
+        request: UpscaleRequest,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> ImageAsset
+}
+
+public protocol VideoGenerating: Sendable {
+    func generate(
+        request: VideoGenerationRequest,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> [ImageAsset]
+}
+
+public struct InferenceServices: Sendable {
+    public var textToImage: any TextToImageGenerating
+    public var imageToText: any ImageDescribing
+    public var imageToImage: any ImageToImageGenerating
+    public var upscale: any ImageUpscaling
+    public var video: (any VideoGenerating)?
+
+    public init(
+        textToImage: any TextToImageGenerating,
+        imageToText: any ImageDescribing,
+        imageToImage: any ImageToImageGenerating,
+        upscale: any ImageUpscaling,
+        video: (any VideoGenerating)? = nil
+    ) {
+        self.textToImage = textToImage
+        self.imageToText = imageToText
+        self.imageToImage = imageToImage
+        self.upscale = upscale
+        self.video = video
+    }
+}

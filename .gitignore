@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+Backups/
+dist/
+.DS_Store
+._*
+*.bak
+
+# Local model weights and generated assets must not enter source control.
+Models/
+Generated/
+*.safetensors
+*.ckpt

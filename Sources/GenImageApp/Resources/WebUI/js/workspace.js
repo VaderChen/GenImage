@@ -1,0 +1,785 @@
+import {
+  actionLabel,
+  escapeHTML,
+  jobLabel,
+  kindLabel,
+  percent,
+} from "./format.js";
+import { t } from "./i18n.js";
+
+const toolMeta = {
+  textToImage: { titleKey: "cap.textToImage" },
+  imageToText: { titleKey: "cap.imageToText" },
+  imageToImage: { titleKey: "cap.imageToImage" },
+  textToVideo: { titleKey: "cap.textToVideo" },
+  imageToVideo: { titleKey: "cap.imageToVideo" },
+  upscale: { titleKey: "cap.upscale" },
+};
+
+const aspectRatios = [
+  { label: "1:1", width: 1, height: 1 },
+  { label: "2:3", width: 2, height: 3 },
+  { label: "3:4", width: 3, height: 4 },
+  { label: "9:16", width: 9, height: 16 },
+  { label: "3:2", width: 3, height: 2 },
+  { label: "4:3", width: 4, height: 3 },
+  { label: "16:9", width: 16, height: 9 },
+];
+
+export function renderWorkspace(state, ui) {
+  return `
+    <section class="workspace-shell">
+      ${renderWorkspaceTabs(ui)}
+      <section class="workspace-grid">
+        ${renderPreviewPanel(state, ui)}
+        ${renderCreationPanel(state, ui)}
+        ${renderInspector(state, ui)}
+      </section>
+    </section>
+  `;
+}
+
+function renderWorkspaceTabs(ui) {
+  const tabs = ui.workspaceTabs || [];
+  return `
+    <div class="workspace-tabs" role="tablist" aria-label="${t("workspace.tabsLabel")}">
+      <div class="workspace-tab-list">
+        ${tabs
+          .map((tab, index) => {
+            const active = tab.id === ui.activeWorkspaceTabID;
+            return `<div class="workspace-tab ${active ? "active" : ""}">
+              <button
+                class="workspace-tab-main"
+                data-action="workspaceTab"
+                data-tab-id="${escapeHTML(tab.id)}"
+                role="tab"
+                aria-selected="${active}"
+                title="${t("workspace.renameTabHint")}"
+              ><span>${escapeHTML(tab.name || t("workspace.tabName", { count: index + 1 }))}</span></button>
+              <button
+                class="workspace-tab-close"
+                data-action="workspaceCloseTab"
+                data-tab-id="${escapeHTML(tab.id)}"
+                title="${t("workspace.closeTab")}"
+                aria-label="${t("workspace.closeTab")}"
+                ${tabs.length <= 1 ? "disabled" : ""}
+              >×</button>
+            </div>`;
+          })
+          .join("")}
+      </div>
+      <button class="workspace-add-tab" data-action="workspaceAddTab" title="${t("workspace.addTab")}" aria-label="${t("workspace.addTab")}">＋</button>
+    </div>
+  `;
+}
+
+export function renderQuickTools(state) {
+  return ["imageToText", "textToImage", "imageToImage", "textToVideo", "imageToVideo", "upscale"]
+    .filter((capability) => hasActiveProfile(state, capability))
+    .map((capability) => renderQuickTool(state, capability))
+    .join("");
+}
+
+function renderCreationPanel(state, ui) {
+  const recipe = state.recipe;
+  const videoOutputSettings = state.videoOutputSettings || {
+    width: 704,
+    height: 480,
+    steps: 8,
+    outputCount: 1,
+    frameCount: 97,
+    frameRate: 24,
+    seed: "42",
+  };
+  const collapsed = ui.creationCollapsed;
+  const descriptionBusy = isImageDescriptionBusy(state);
+  const videoBusy = isVideoGenerationBusy(state);
+  const promptTab = ["negative", "imageOutput", "videoOutput"].includes(ui.promptTab)
+    ? ui.promptTab
+    : "prompt";
+  const toggleLabel = collapsed ? t("workspace.expandCreation") : t("workspace.collapseCreation");
+  const showGenerateText = hasActiveProfile(state, "imageToText");
+  const showGenerateImage = hasActiveProfile(state, "textToImage");
+  const showGenerateVideo = hasActiveProfile(state, "textToVideo")
+    || hasActiveProfile(state, "imageToVideo");
+  return `
+    <aside class="creation-panel ${collapsed ? "collapsed" : ""}">
+      <div class="creation-header">
+        <button
+          class="ghost-button compact creation-toggle"
+          data-action="toggleCreationPanel"
+          aria-expanded="${collapsed ? "false" : "true"}"
+          title="${toggleLabel}"
+        ><span aria-hidden="true">${collapsed ? "▴" : "▾"}</span>${toggleLabel}</button>
+        <div class="toolbar-spacer"></div>
+        ${
+          showGenerateText
+            ? `<button
+                class="secondary-button creation-generate-button"
+                data-action="describe"
+                ${descriptionBusy ? "disabled" : ""}
+              >⌕ ${t("workspace.generateText")}</button>`
+            : ""
+        }
+        ${
+          showGenerateVideo
+            ? `<button
+                class="${showGenerateImage ? "secondary-button" : "primary-button"} creation-generate-button"
+                data-action="generateVideo"
+                ${descriptionBusy || videoBusy ? "disabled" : ""}
+              >▶ ${t("workspace.generateVideo")}</button>`
+            : ""
+        }
+        ${
+          showGenerateImage
+            ? `<button
+                class="primary-button creation-generate-button"
+                data-action="generate"
+                ${descriptionBusy ? "disabled" : ""}
+              >✦ ${t("workspace.generate")}</button>`
+            : ""
+        }
+      </div>
+
+      ${
+        collapsed
+          ? ""
+          : `
+      <div class="creation-scroll" data-scroll-id="creation">
+        <div class="prompt-tab-header">
+          <div class="creation-tab-controls">
+            <div class="prompt-tabs" role="tablist" aria-label="${t("workspace.creationTabsLabel")}">
+              ${promptTabButton("prompt", t("workspace.prompt"), promptTab)}
+              ${promptTabButton("negative", t("workspace.negative"), promptTab)}
+              ${promptTabButton("imageOutput", t("workspace.imageOutput"), promptTab)}
+              ${promptTabButton("videoOutput", t("workspace.videoOutput"), promptTab)}
+            </div>
+            ${promptTab === "imageOutput" ? renderInlineAspectRatios(recipe, "image") : ""}
+            ${promptTab === "videoOutput" ? renderInlineAspectRatios(videoOutputSettings, "video") : ""}
+          </div>
+          <button class="ghost-button compact" data-action="applyProfileDefaults">${t("workspace.applyDefaults")}</button>
+        </div>
+        <div class="prompt-tab-panel" role="tabpanel">
+          ${renderCreationTab(state, promptTab, descriptionBusy)}
+        </div>
+      </div>
+      `
+      }
+    </aside>
+  `;
+}
+
+function hasActiveProfile(state, capability) {
+  const activeProfileID = state.activeProfileIDs?.[capability];
+  if (!activeProfileID) return false;
+  const disabledProfileIDs = new Set(state.disabledProfileIDs || []);
+  return state.profiles.some(
+    (profile) =>
+      profile.id === activeProfileID
+      && profile.capability === capability
+      && !disabledProfileIDs.has(profile.id),
+  );
+}
+
+function promptTabButton(tab, label, activeTab) {
+  const active = tab === activeTab;
+  return `<button
+    class="prompt-tab ${active ? "active" : ""}"
+    data-action="promptTab"
+    data-tab="${tab}"
+    role="tab"
+    aria-selected="${active}"
+  >${label}</button>`;
+}
+
+function renderCreationTab(state, promptTab, descriptionBusy) {
+  if (promptTab === "imageOutput") return renderOutputSettings(state.recipe, "image");
+  if (promptTab === "videoOutput") {
+    return renderOutputSettings(state.videoOutputSettings, "video");
+  }
+  return renderPromptEditor(state.recipe, promptTab, descriptionBusy);
+}
+
+function renderInlineAspectRatios(settings, outputKind) {
+  const activeRatio = closestAspectRatio(settings.width, settings.height);
+  const label = outputKind === "video" ? t("workspace.videoAspectRatio") : t("workspace.aspectRatio");
+  return `<div class="inline-aspect-ratios" aria-label="${label}">
+    ${aspectRatios.map((ratio) => aspectRatioChip(ratio, activeRatio, outputKind)).join("")}
+  </div>`;
+}
+
+function renderPromptEditor(recipe, promptTab, disabled) {
+  const disabledAttribute = disabled ? "disabled aria-busy=\"true\"" : "";
+  if (promptTab === "negative") {
+    return `<textarea
+      id="recipe-negative"
+      class="prompt-area"
+      data-recipe-field="negativePrompt"
+      data-preserve-focus="recipe-negative"
+      placeholder="${t("workspace.negativePlaceholder")}"
+      ${disabledAttribute}
+    >${escapeHTML(recipe.negativePrompt)}</textarea>`;
+  }
+
+  return `<textarea
+    id="recipe-prompt"
+    class="prompt-area"
+    data-recipe-field="prompt"
+    data-preserve-focus="recipe-prompt"
+    placeholder="${t("workspace.promptPlaceholder")}"
+    ${disabledAttribute}
+  >${escapeHTML(recipe.prompt)}</textarea>`;
+}
+
+function renderOutputSettings(settings, outputKind) {
+  const isVideo = outputKind === "video";
+  const ratio = closestAspectRatio(settings.width, settings.height);
+  const widthBounds = resolutionBounds("width", ratio);
+  const heightBounds = resolutionBounds("height", ratio);
+  const duration = isVideo
+    ? Number(settings.frameCount) / Math.max(1, Number(settings.frameRate))
+    : 0;
+  return `<div class="output-tab-panel">
+    <div class="output-detail-grid">
+      <section class="output-setting-group resolution-setting-card">
+        <div class="output-setting-heading">
+          <strong>${t("workspace.resolution")}</strong>
+          <span data-resolution-summary data-output-kind="${outputKind}">${settings.width} × ${settings.height} px</span>
+        </div>
+        <div class="resolution-grid">
+          ${resolutionSlider(t("workspace.width"), "width", settings.width, widthBounds, ratio, outputKind)}
+          ${resolutionSlider(t("workspace.height"), "height", settings.height, heightBounds, ratio, outputKind)}
+        </div>
+      </section>
+
+      <section class="output-setting-group output-parameter-card ${isVideo ? "video-output-parameter-card" : ""}">
+        <div class="output-setting-heading">
+          <strong>${isVideo ? t("workspace.videoParameters") : t("workspace.parameters")}</strong>
+          ${
+            isVideo
+              ? `<span>${duration.toFixed(1)} ${t("workspace.seconds")} · ${settings.frameRate} FPS</span>`
+              : ""
+          }
+        </div>
+        <div class="output-parameter-list">
+          <div class="output-parameter-primary-row">
+            ${numberField(t("workspace.steps"), "steps", settings.steps, 1, 100, outputKind)}
+            ${numberField(t("workspace.count"), "outputCount", settings.outputCount, 1, 8, outputKind)}
+          </div>
+          ${
+            isVideo
+              ? `<div class="output-parameter-primary-row">
+                  ${numberField(t("workspace.frameCount"), "frameCount", settings.frameCount, 1, 512, outputKind)}
+                  ${numberField(t("workspace.frameRate"), "frameRate", settings.frameRate, 1, 120, outputKind)}
+                </div>`
+              : ""
+          }
+          <div class="field-group seed-field">
+            <label for="${outputKind}-seed">${t("workspace.seed")}</label>
+            <div class="seed-input-row">
+              <input
+                id="${outputKind}-seed"
+                class="field"
+                type="text"
+                inputmode="numeric"
+                ${settingsFieldAttribute(outputKind, "seed")}
+                data-preserve-focus="${outputKind}-seed"
+                value="${escapeHTML(settings.seed)}"
+              />
+              <button
+                class="icon-button compact seed-random-button"
+                data-action="randomizeSeed"
+                data-output-kind="${outputKind}"
+                title="${t("workspace.randomSeed")}"
+                aria-label="${t("workspace.randomSeed")}"
+              ><svg class="seed-random-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="4" y="4" width="16" height="16" rx="3"></rect>
+                <circle cx="8.5" cy="8.5" r="1"></circle>
+                <circle cx="15.5" cy="8.5" r="1"></circle>
+                <circle cx="12" cy="12" r="1"></circle>
+                <circle cx="8.5" cy="15.5" r="1"></circle>
+                <circle cx="15.5" cy="15.5" r="1"></circle>
+              </svg></button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>`;
+}
+
+function closestAspectRatio(width, height) {
+  const value = width / Math.max(1, height);
+  return aspectRatios.reduce((best, ratio) =>
+    Math.abs(ratio.width / ratio.height - value) < Math.abs(best.width / best.height - value) ? ratio : best,
+  );
+}
+
+function aspectRatioChip(ratio, activeRatio, outputKind) {
+  const active = ratio.label === activeRatio.label;
+  return `<button
+    class="chip aspect-ratio-chip ${active ? "active" : ""}"
+    data-action="aspectRatio"
+    data-ratio-width="${ratio.width}"
+    data-ratio-height="${ratio.height}"
+    data-output-kind="${outputKind}"
+  >${ratio.label}</button>`;
+}
+
+function resolutionBounds(dimension, ratio) {
+  const ratioValue = dimension === "width"
+    ? ratio.width / ratio.height
+    : ratio.height / ratio.width;
+  return {
+    min: Math.max(64, Math.ceil((64 * ratioValue) / 16) * 16),
+    max: Math.min(4096, Math.floor((4096 * ratioValue) / 16) * 16),
+  };
+}
+
+function resolutionSlider(label, field, value, bounds, ratio, outputKind) {
+  return `<div class="resolution-control">
+    <div class="resolution-label">
+      <label for="${outputKind}-${field}">${label}</label>
+      <output data-dimension-value="${field}" data-output-kind="${outputKind}">${value} px</output>
+    </div>
+    <input
+      id="${outputKind}-${field}"
+      class="resolution-slider"
+      type="range"
+      min="${bounds.min}"
+      max="${bounds.max}"
+      step="16"
+      value="${value}"
+      data-dimension-field="${field}"
+      data-output-kind="${outputKind}"
+      data-ratio-width="${ratio.width}"
+      data-ratio-height="${ratio.height}"
+    />
+    <div class="resolution-range"><span>${bounds.min} px</span><span>${bounds.max} px</span></div>
+  </div>`;
+}
+
+function renderQuickTool(state, capability) {
+  const meta = toolMeta[capability];
+  const disabledProfileIDs = new Set(state.disabledProfileIDs || []);
+  const profiles = state.profiles.filter(
+    (profile) => profile.capability === capability && !disabledProfileIDs.has(profile.id),
+  );
+  const activeID = state.activeProfileIDs[capability];
+  return `
+    <div class="tool-card">
+      <div class="tool-copy">
+        <strong>${t(meta.titleKey)}</strong>
+        <select
+          class="profile-select"
+          data-profile-capability="${capability}"
+          aria-label="${t(meta.titleKey)} Profile"
+          ${profiles.length ? "" : "disabled"}
+        >
+          ${profiles.length ? "" : `<option value="">${t("profile.noProfile")}</option>`}
+          ${profiles.length && !activeID ? `<option value="" selected disabled>${t("profile.select")}</option>` : ""}
+          ${profiles
+            .map(
+              (profile) => `<option value="${profile.id}" ${profile.id === activeID ? "selected" : ""}>
+                ${escapeHTML(profile.name)}
+              </option>`,
+            )
+            .join("")}
+          </select>
+          ${capability === "textToImage" ? renderLoRAControl(state) : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderLoRAControl(state) {
+  const loras = Array.isArray(state.loras) ? state.loras : [];
+  const selectedID = state.recipe.loraID || "";
+  const scale = Number.isFinite(Number(state.recipe.loraScale))
+    ? Math.min(1, Math.max(0, Number(state.recipe.loraScale)))
+    : 1;
+  return `<div class="lora-control">
+    <label for="recipe-lora">${t("lora.label")}</label>
+    <select
+      id="recipe-lora"
+      class="profile-select lora-select"
+      data-lora-select
+      aria-label="${t("lora.label")}"
+      ${loras.length ? "" : "disabled"}
+    >
+      <option value="">${loras.length ? t("lora.none") : t("lora.noModels")}</option>
+      ${loras
+        .map(
+          (lora) => `<option value="${escapeHTML(lora.id)}" ${lora.id === selectedID ? "selected" : ""}>
+            ${escapeHTML(lora.displayName)}
+          </option>`,
+        )
+        .join("")}
+    </select>
+    ${
+      selectedID
+        ? `<div class="lora-scale-row">
+            <span>${t("lora.scale")}</span>
+            <input type="range" min="0" max="1" step="0.05" value="${scale}" data-lora-scale />
+            <output data-lora-scale-value>${Math.round(scale * 100)}%</output>
+          </div>`
+        : ""
+    }
+  </div>`;
+}
+
+function renderPreviewPanel(state, ui) {
+  const fixedKindAsset = ui.previewMode === "single" ? selectedAsset(state) : null;
+  return `
+    <main class="preview-panel">
+      <div class="preview-toolbar">
+        ${previewModeButton("grid", `▦ ${t("preview.grid")}`, ui)}
+        ${previewModeButton("single", `▭ ${t("preview.single")}`, ui)}
+        ${previewModeButton("compare", `◫ ${t("preview.compare")}`, ui)}
+        <div class="toolbar-spacer"></div>
+        ${
+          ui.previewMode === "grid"
+            ? ""
+            : `
+              <button class="icon-button compact" data-action="zoomOut">−</button>
+              <input class="zoom-range" type="range" min="0.25" max="2.5" step="0.25" value="${ui.zoom}" data-ui-field="zoom" />
+              <span class="section-note">${Math.round(ui.zoom * 100)}%</span>
+              <button class="icon-button compact" data-action="zoomIn">＋</button>
+              <button class="ghost-button compact" data-action="fitPreview">${t("preview.fit")}</button>
+            `
+        }
+      </div>
+      <div class="preview-stage" data-scroll-id="preview" data-pan-enabled="${ui.previewMode !== "grid"}">
+        ${renderPreviewContent(state, ui)}
+      </div>
+      ${fixedKindAsset ? `<span class="asset-kind preview-fixed-kind">${kindLabel(fixedKindAsset.kind)}</span>` : ""}
+      ${renderFilmstrip(state)}
+    </main>
+  `;
+}
+
+function renderPreviewContent(state, ui) {
+  if (!state.assets.length) return emptyState(t("preview.noImages"), t("preview.noImagesDetail"), "▧");
+  if (ui.previewMode === "single") return renderSingle(state, ui);
+  if (ui.previewMode === "compare") return renderCompare(state, ui);
+  return `<div class="asset-grid">${state.assets.map((asset) => renderAssetCard(asset, state)).join("")}</div>`;
+}
+
+function renderAssetCard(asset, state) {
+  return `
+    <button class="asset-card ${asset.id === state.selectedAssetID ? "selected" : ""}" data-action="selectAsset" data-asset-id="${asset.id}">
+      ${renderArtwork(asset)}
+      <div class="asset-caption">
+        <div class="asset-caption-copy">
+          <strong>${escapeHTML(asset.title)}</strong>
+          <span>${asset.pixelWidth} × ${asset.pixelHeight}</span>
+        </div>
+        <span class="muted">›</span>
+      </div>
+    </button>
+  `;
+}
+
+function renderSingle(state, ui) {
+  const asset = selectedAsset(state);
+  if (!asset) return emptyState(t("preview.noSelection"), t("preview.selectFilmstrip"), "▧");
+  const size = Math.round(ui.zoom * 100);
+  return `
+    <div class="single-stage ${ui.zoom > 1 ? "zoomed" : ""}">
+      <div class="single-asset" style="width:${size}%;height:${size}%">
+        ${renderArtwork(asset, true, false)}
+      </div>
+    </div>
+  `;
+}
+
+function renderCompare(state, ui) {
+  const primary = selectedAsset(state);
+  const secondary = state.assets.find((asset) => asset.id === state.comparisonAssetID);
+  if (!primary || !secondary) return emptyState(t("preview.needTwo"), t("preview.needTwoDetail"), "◫");
+  const width = Math.round(385 * ui.zoom);
+  return `
+    <div class="compare-stage">
+      ${comparisonPane(t("preview.current"), primary, width)}
+      ${comparisonPane(t("preview.comparison"), secondary, width)}
+    </div>
+  `;
+}
+
+function comparisonPane(title, asset, width) {
+  return `
+    <div class="compare-pane" style="width:${width}px">
+      <h3><span>${title}</span><span class="muted">${asset.pixelWidth} × ${asset.pixelHeight}</span></h3>
+      ${renderArtwork(asset, true)}
+    </div>
+  `;
+}
+
+function renderArtwork(asset, controls = false, showKind = true) {
+  const hasMedia = Boolean(asset.previewURL);
+  const isVideo = asset.kind === "generatedVideo";
+  const media = hasMedia
+    ? isVideo
+      ? `<video
+          src="${escapeHTML(asset.previewURL)}"
+          data-asset-id="${escapeHTML(asset.id)}"
+          aria-label="${escapeHTML(asset.title)}"
+          preload="metadata"
+          playsinline
+          ${controls ? "controls" : "muted"}
+        ></video>`
+      : `<img src="${escapeHTML(asset.previewURL)}" data-asset-id="${escapeHTML(asset.id)}" alt="${escapeHTML(asset.title)}" draggable="false" />`
+    : `<span class="placeholder-icon">${asset.kind === "upscaled" ? "↗" : asset.kind === "generated" ? "✦" : "▧"}</span>`;
+  return `
+    <div class="asset-artwork ${asset.kind} ${hasMedia ? "has-image" : ""}">
+      ${media}
+      ${showKind ? `<span class="asset-kind">${kindLabel(asset.kind)}</span>` : ""}
+    </div>
+  `;
+}
+
+function renderFilmstrip(state) {
+  return `<div class="filmstrip" data-scroll-id="filmstrip">
+    ${state.assets
+      .map(
+        (asset) => `
+          <div class="film-thumb-shell">
+            <button
+              class="film-thumb ${asset.id === state.selectedAssetID ? "selected" : ""}"
+              data-action="selectAsset"
+              data-asset-id="${asset.id}"
+              title="${escapeHTML(asset.title)}"
+            >${renderArtwork(asset)}</button>
+            <button
+              class="film-thumb-remove"
+              data-action="removeAsset"
+              data-asset-id="${asset.id}"
+              title="${t("preview.removeImage")}"
+              aria-label="${t("preview.removeImage")}"
+            >×</button>
+          </div>
+        `,
+      )
+      .join("")}
+  </div>`;
+}
+
+function isImageDescriptionBusy(state) {
+  return state.jobs.some((job) =>
+    job.action === "describe" && ["queued", "running"].includes(job.state),
+  );
+}
+
+function isVideoGenerationBusy(state) {
+  return state.jobs.some((job) =>
+    job.action === "generateVideo" && ["queued", "running"].includes(job.state),
+  );
+}
+
+function renderInspector(state, ui) {
+  const activeTab = ui.inspectorTab === "jobs" ? "jobs" : "info";
+  return `
+    <aside class="inspector-panel">
+      <div class="inspector-tabs" role="tablist" aria-label="${t("inspector.panelLabel")}">
+        ${inspectorTabButton("info", t("inspector.infoTab"), activeTab)}
+        ${inspectorTabButton("jobs", t("jobs.title"), activeTab)}
+      </div>
+      <div class="inspector-content" role="tabpanel">
+        ${activeTab === "jobs" ? renderJobsPanel(state) : renderAssetInspector(state)}
+      </div>
+    </aside>
+  `;
+}
+
+function inspectorTabButton(tab, label, activeTab) {
+  const active = tab === activeTab;
+  return `
+    <button
+      class="inspector-tab ${active ? "active" : ""}"
+      data-action="inspectorTab"
+      data-tab="${tab}"
+      role="tab"
+      aria-selected="${active}"
+    >${label}</button>
+  `;
+}
+
+function renderAssetInspector(state) {
+  const asset = selectedAsset(state);
+  if (!asset) {
+    return `<div class="empty-state"><span class="empty-icon">ⓘ</span><strong>${t("inspector.noSelection")}</strong></div>`;
+  }
+  const operation = [...state.operations].reverse().find((item) => item.outputAssetIDs.includes(asset.id));
+  const lineage = buildLineage(state.assets, asset);
+  const isVideo = asset.kind === "generatedVideo";
+  const canEdit = !isVideo && hasActiveProfile(state, "imageToImage");
+  return `
+    <div class="inspector-scroll" data-scroll-id="inspector-info">
+      <div class="section-heading"><h2>${escapeHTML(asset.title)}</h2></div>
+      <div class="inspector-preview">${renderArtwork(asset, true)}</div>
+      ${
+        isVideo
+          ? ""
+          : `<div class="inspector-actions">
+              <button class="secondary-button compact" data-action="describe">⌕ ${t("inspector.caption")}</button>
+              ${canEdit ? `<button class="secondary-button compact" data-action="imageToImage">▧ ${t("cap.imageToImage")}</button>` : ""}
+              <button class="secondary-button compact" data-action="upscale">↗ ${t("inspector.upscale")}</button>
+            </div>`
+      }
+      <div class="inspector-group">
+        <h3>${t(isVideo ? "inspector.videoInfo" : "inspector.imageInfo")}</h3>
+        ${detailRow(t("inspector.dimensions"), `${asset.pixelWidth} × ${asset.pixelHeight}`)}
+        ${detailRow(t("inspector.kind"), kindLabel(asset.kind))}
+      </div>
+      ${
+        operation?.profileName
+          ? `<div class="inspector-group">
+              <h3>${t("inspector.profileSnapshot")}</h3>
+              ${detailRow(t("inspector.name"), operation.profileName)}
+              ${detailRow(t("inspector.profileRevision"), `r${operation.profileRevision || 1}`)}
+            </div>`
+          : ""
+      }
+      <div class="inspector-group">
+        <h3>${t("inspector.lineage")}</h3>
+        <div class="lineage">
+          ${lineage.map((item) => `<div class="lineage-item"><span>›</span>${escapeHTML(item.title)}</div>`).join("")}
+        </div>
+      </div>
+      <div class="inspector-group">
+        <h3>${t("inspector.currentPrompt")}</h3>
+        <div class="section-note">${escapeHTML(state.recipe.prompt)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderJobsPanel(state) {
+  const running = state.jobs.filter((job) => job.state === "queued" || job.state === "running").length;
+  return `
+    <section class="inspector-jobs">
+      <div class="job-header">
+        <span class="section-note">${t("jobs.running", { count: running })}</span>
+        <div class="toolbar-spacer"></div>
+        <button class="ghost-button compact" data-action="clearJobs">${t("jobs.clear")}</button>
+      </div>
+      <div class="inspector-job-list" data-scroll-id="inspector-jobs">
+        ${
+          state.jobs.length
+            ? state.jobs.map(renderJob).join("")
+            : `<div class="empty-state"><span class="empty-icon">☷</span><span>${t("jobs.empty")}</span></div>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderJob(job) {
+  const cancellable = job.state === "running" || job.state === "queued";
+  return `
+    <div class="job-card inspector-job-card">
+      <strong>${actionLabel(job.action)}</strong>
+      ${
+        cancellable
+          ? `<button class="ghost-button compact" data-action="cancelJob" data-job-id="${job.id}">×</button>`
+          : `<span class="section-note">${jobLabel(job.state)}</span>`
+      }
+      <progress value="${job.progress}" max="1"></progress>
+      <span class="section-note job-status-line">
+        ${jobLabel(job.state)} · ${percent(job.progress)}<span data-job-timing="${escapeHTML(job.id)}">${escapeHTML(jobTimingSuffix(job))}</span>
+      </span>
+    </div>
+  `;
+}
+
+export function refreshJobTimings(state, container = document) {
+  const jobsByID = new Map(state.jobs.map((job) => [job.id, job]));
+  container.querySelectorAll("[data-job-timing]").forEach((element) => {
+    const job = jobsByID.get(element.dataset.jobTiming);
+    element.textContent = job ? jobTimingSuffix(job) : "";
+  });
+}
+
+function jobTimingSuffix(job, now = Date.now()) {
+  const startedAt = parseTimestamp(job.startedAt);
+  if (job.state === "running") {
+    const progress = Math.min(1, Math.max(0, Number(job.progress) || 0));
+    const elapsed = startedAt === null ? 0 : Math.max(0, now - startedAt);
+    const remaining = progress > 0 ? elapsed * (1 - progress) / progress : null;
+    const time = remaining === null ? "--:--" : formatDuration(remaining, true);
+    return ` · ${t("job.estimatedRemaining", { time })}`;
+  }
+  if (job.state === "completed") {
+    const finishedAt = parseTimestamp(job.finishedAt);
+    if (startedAt === null || finishedAt === null) return "";
+    return ` · ${t("job.generationTime", { time: formatDuration(finishedAt - startedAt) })}`;
+  }
+  return "";
+}
+
+function parseTimestamp(value) {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function formatDuration(milliseconds, roundUp = false) {
+  const secondsValue = Math.max(0, milliseconds / 1_000);
+  const totalSeconds = roundUp ? Math.ceil(secondsValue) : Math.round(secondsValue);
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor(totalSeconds % 3_600 / 60);
+  const seconds = totalSeconds % 60;
+  const twoDigits = (value) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${twoDigits(minutes)}:${twoDigits(seconds)}`
+    : `${twoDigits(minutes)}:${twoDigits(seconds)}`;
+}
+
+function numberField(label, field, value, min, max, outputKind) {
+  return `<div class="field-group">
+    <label for="${outputKind}-${field}">${label}</label>
+    <input
+      id="${outputKind}-${field}"
+      class="field"
+      type="number"
+      min="${min}"
+      max="${max}"
+      ${settingsFieldAttribute(outputKind, field)}
+      data-preserve-focus="${outputKind}-${field}"
+      value="${value}"
+    />
+  </div>`;
+}
+
+function settingsFieldAttribute(outputKind, field) {
+  return outputKind === "video" ? `data-video-field="${field}"` : `data-recipe-field="${field}"`;
+}
+
+function previewModeButton(mode, title, ui) {
+  return `<button class="mode-button compact ${ui.previewMode === mode ? "active" : ""}" data-action="previewMode" data-mode="${mode}">${title}</button>`;
+}
+
+function detailRow(label, value) {
+  return `<div class="detail-row"><span>${escapeHTML(label)}</span><span>${escapeHTML(value)}</span></div>`;
+}
+
+function selectedAsset(state) {
+  return state.assets.find((asset) => asset.id === state.selectedAssetID);
+}
+
+function buildLineage(assets, start) {
+  const byID = new Map(assets.map((asset) => [asset.id, asset]));
+  const result = [];
+  const visited = new Set();
+  let current = start;
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    result.unshift(current);
+    current = current.parentAssetID ? byID.get(current.parentAssetID) : null;
+  }
+  return result;
+}
+
+function emptyState(title, description, icon) {
+  return `<div class="empty-state"><span class="empty-icon">${icon}</span><strong>${title}</strong><span>${description}</span></div>`;
+}

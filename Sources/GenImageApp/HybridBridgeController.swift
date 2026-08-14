@@ -1,0 +1,696 @@
+import AppKit
+import Combine
+import Foundation
+import GenImageCore
+import ImageIO
+import UniformTypeIdentifiers
+import WebKit
+
+private enum SourceImageAction {
+    case describe
+    case imageToImage
+    case imageToVideo
+    case upscale
+}
+
+@MainActor
+final class HybridBridgeController: NSObject, ObservableObject {
+    let store = AppStore()
+    let assetSchemeHandler = AssetSchemeHandler()
+    let webUISchemeHandler = WebUISchemeHandler()
+
+    private weak var webView: WKWebView?
+    private var storeCancellable: AnyCancellable?
+    private var pendingPush: Task<Void, Never>?
+    private var pasteKeyMonitor: Any?
+    private var sharingPicker: NSSharingServicePicker?
+    private var pageReady = false
+
+    override init() {
+        super.init()
+        storeCancellable = store.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in
+                self?.scheduleStatePush()
+            }
+        }
+    }
+
+    func attach(webView: WKWebView) {
+        self.webView = webView
+        if let pasteKeyMonitor {
+            NSEvent.removeMonitor(pasteKeyMonitor)
+        }
+        pasteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self, weak webView] event in
+            guard let webView,
+                  event.window === webView.window,
+                  Self.isPasteShortcut(event),
+                  self?.pasteImageFromSystemClipboard() == true else {
+                return event
+            }
+            return nil
+        }
+    }
+
+    func pasteImageFromSystemClipboard() -> Bool {
+        guard pageReady,
+              let webView,
+              let payload = Self.clipboardImagePayload(from: .general),
+              let data = try? JSONEncoder().encode(payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        webView.evaluateJavaScript("window.GenImageNative?.receiveClipboardImage(\(json));")
+        return true
+    }
+
+    private static func isPasteShortcut(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return event.charactersIgnoringModifiers?.lowercased() == "v"
+            && (modifiers.contains(.command) || modifiers.contains(.control))
+    }
+
+    func pushState() {
+        guard pageReady, let webView else { return }
+        assetSchemeHandler.updateAssets(store.assets)
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(WebAppState(store: store))
+            guard let json = String(data: data, encoding: .utf8) else { return }
+            webView.evaluateJavaScript("window.GenImageNative?.receiveState(\(json));")
+        } catch {
+            sendError(id: nil, message: "無法同步應用程式狀態：\(error.localizedDescription)")
+        }
+    }
+
+    private func scheduleStatePush() {
+        pendingPush?.cancel()
+        pendingPush = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(35))
+            if Task.isCancelled { return }
+            self?.pushState()
+        }
+    }
+
+    private func handle(method: String, params: [String: Any]) throws {
+        switch method {
+        case "bootstrap":
+            pushState()
+
+        case "selectAsset":
+            guard let id = uuid(params["assetID"]) else { throw BridgeError.invalidParameters }
+            store.selectAsset(id)
+
+        case "removeAsset":
+            guard let id = uuid(params["assetID"]) else { throw BridgeError.invalidParameters }
+            store.removeAsset(id, selecting: uuid(params["replacementAssetID"]))
+
+        case "openAsset":
+            try openAsset(params)
+
+        case "downloadAsset":
+            try downloadAsset(params)
+
+        case "copyAsset":
+            try copyAsset(params)
+
+        case "shareAsset":
+            try shareAsset(params)
+
+        case "selectProfile":
+            guard let id = uuid(params["profileID"]),
+                  let capabilityRaw = params["capability"] as? String,
+                  let capability = ModelCapability(rawValue: capabilityRaw) else {
+                throw BridgeError.invalidParameters
+            }
+            store.selectProfile(id, for: capability)
+
+        case "deactivateProfile":
+            guard let id = uuid(params["profileID"]),
+                  let capabilityRaw = params["capability"] as? String,
+                  let capability = ModelCapability(rawValue: capabilityRaw) else {
+                throw BridgeError.invalidParameters
+            }
+            store.deactivateProfile(id, for: capability)
+
+        case "applyProfileDefaults":
+            if params["outputKind"] as? String == "video" {
+                store.applyActiveVideoProfileDefaults()
+            } else {
+                store.applyActiveGenerationProfileDefaults()
+            }
+
+        case "updateRecipe":
+            try updateRecipe(params)
+
+        case "updateVideoOutputSettings":
+            updateVideoOutputSettings(params)
+
+        case "randomizeSeed":
+            store.randomizeSeed()
+
+        case "randomizeVideoSeed":
+            store.randomizeVideoSeed()
+
+        case "generate":
+            store.generate(linkToSelectedAsset: params["linkToSelectedAsset"] as? Bool ?? false)
+
+        case "generateVideo":
+            let hasImageToVideo = store.activeProfile(for: .imageToVideo) != nil
+            let hasTextToVideo = store.activeProfile(for: .textToVideo) != nil
+            if store.selectedSourceImage == nil, hasImageToVideo, !hasTextToVideo {
+                performSourceImageAction(.imageToVideo)
+            } else {
+                store.requestVideoGeneration()
+            }
+
+        case "describe":
+            performSourceImageAction(.describe)
+
+        case "upscale":
+            performSourceImageAction(.upscale)
+
+        case "imageToImage":
+            performSourceImageAction(.imageToImage)
+
+        case "importImage":
+            importImage(then: nil)
+
+        case "pasteImage":
+            try importPastedImage(params)
+
+        case "cancelJob":
+            guard let id = uuid(params["jobID"]) else { throw BridgeError.invalidParameters }
+            store.cancelJob(id)
+
+        case "clearJobs":
+            store.clearFinishedJobs()
+
+        case "setModelRoot":
+            guard let path = params["path"] as? String else {
+                throw BridgeError.invalidParameters
+            }
+            store.setModelRoot(path)
+
+        case "chooseModelRoot":
+            chooseModelRoot()
+
+        case "installModel":
+            guard let model = model(from: params) else { throw BridgeError.invalidParameters }
+            store.installModel(model)
+
+        case "pauseModel":
+            guard let model = model(from: params) else { throw BridgeError.invalidParameters }
+            store.pauseModel(model)
+
+        case "removeModel":
+            guard let model = model(from: params) else { throw BridgeError.invalidParameters }
+            store.removeModel(model)
+
+        case "repairModel":
+            guard let model = model(from: params) else { throw BridgeError.invalidParameters }
+            store.repairModel(model)
+
+        case "duplicateProfile":
+            guard let id = uuid(params["profileID"]),
+                  let profile = store.profiles.first(where: { $0.id == id }) else {
+                throw BridgeError.invalidParameters
+            }
+            store.duplicateProfile(profile)
+
+        case "createProfile":
+            guard let rawValue = params["capability"] as? String,
+                  let capability = ModelCapability(rawValue: rawValue) else {
+                throw BridgeError.invalidParameters
+            }
+            store.createProfile(for: capability)
+
+        case "updateProfile":
+            guard let id = uuid(params["profileID"]),
+                  let name = params["name"] as? String,
+                  let modelID = params["modelID"] as? String,
+                  let revision = params["modelRevision"] as? String,
+                  let architectureRaw = params["architecture"] as? String,
+                  let architecture = InferenceArchitecture(rawValue: architectureRaw) else {
+                throw BridgeError.invalidParameters
+            }
+            store.updateProfile(
+                id: id,
+                name: name,
+                modelID: modelID,
+                modelRevision: revision,
+                architecture: architecture
+            )
+
+        case "deleteProfile":
+            guard let id = uuid(params["profileID"]) else { throw BridgeError.invalidParameters }
+            store.deleteProfile(id)
+
+        case "clearStatus":
+            store.statusMessage = nil
+
+        default:
+            throw BridgeError.unknownMethod(method)
+        }
+    }
+
+    private func updateRecipe(_ params: [String: Any]) throws {
+        if let prompt = params["prompt"] as? String { store.recipe.prompt = prompt }
+        if let negative = params["negativePrompt"] as? String { store.recipe.negativePrompt = negative }
+        if let value = integer(params["width"]) { store.recipe.width = min(max(value, 64), 4096) }
+        if let value = integer(params["height"]) { store.recipe.height = min(max(value, 64), 4096) }
+        if let value = integer(params["steps"]) { store.recipe.steps = min(max(value, 1), 100) }
+        if let value = integer(params["outputCount"]) { store.recipe.outputCount = min(max(value, 1), 8) }
+        if let seed = params["seed"] as? String, let value = UInt64(seed) { store.recipe.seed = value }
+        if params.keys.contains("loraID") {
+            let loraID = (params["loraID"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if loraID.isEmpty {
+                store.recipe.lora = nil
+            } else {
+                guard let descriptor = store.loras.first(where: { $0.id == loraID }) else {
+                    throw BridgeError.invalidParameters
+                }
+                let requestedScale = double(params["loraScale"]) ?? store.recipe.lora?.scale ?? 1
+                guard requestedScale.isFinite, (0...1).contains(requestedScale) else {
+                    throw BridgeError.invalidParameters
+                }
+                store.recipe.lora = LoRASelection(
+                    adapterID: descriptor.id,
+                    localURL: descriptor.localURL,
+                    scale: requestedScale
+                )
+            }
+        } else if let requestedScale = double(params["loraScale"]), var selection = store.recipe.lora {
+            guard requestedScale.isFinite, (0...1).contains(requestedScale) else {
+                throw BridgeError.invalidParameters
+            }
+            selection.scale = requestedScale
+            store.recipe.lora = selection
+        }
+    }
+
+    private func updateVideoOutputSettings(_ params: [String: Any]) {
+        let seed = (params["seed"] as? String).flatMap(UInt64.init)
+        store.updateVideoOutputSettings(
+            width: integer(params["width"]),
+            height: integer(params["height"]),
+            steps: integer(params["steps"]),
+            outputCount: integer(params["outputCount"]),
+            frameCount: integer(params["frameCount"]),
+            frameRate: integer(params["frameRate"]),
+            seed: seed
+        )
+    }
+
+    private func performSourceImageAction(_ action: SourceImageAction) {
+        guard store.selectedSourceImage != nil else {
+            importImage(then: action)
+            return
+        }
+
+        switch action {
+        case .describe: store.describeSelected()
+        case .imageToImage: store.imageToImageSelected()
+        case .imageToVideo: store.requestVideoGeneration()
+        case .upscale: store.upscaleSelected()
+        }
+    }
+
+    private func importImage(then action: SourceImageAction?) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "選擇要加入 GenImage 工作區的圖片"
+
+        guard panel.runModal() == .OK, let url = panel.url, let image = NSImage(contentsOf: url) else {
+            return
+        }
+        let representation = image.representations.max {
+            $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh
+        }
+        store.importImage(
+            url: url,
+            pixelWidth: representation?.pixelsWide ?? Int(image.size.width),
+            pixelHeight: representation?.pixelsHigh ?? Int(image.size.height)
+        )
+
+        switch action {
+        case .describe: store.describeSelected()
+        case .imageToImage: store.imageToImageSelected()
+        case .imageToVideo: store.requestVideoGeneration()
+        case .upscale: store.upscaleSelected()
+        default: break
+        }
+    }
+
+    private func chooseModelRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = URL(fileURLWithPath: store.modelRootPath, isDirectory: true)
+        panel.message = "選擇 GenImage 預設模型目錄"
+        panel.prompt = "選擇目錄"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        store.setModelRoot(url.path)
+    }
+
+    private func assetURL(from params: [String: Any]) throws -> URL {
+        guard let id = uuid(params["assetID"]),
+              let asset = store.assets.first(where: { $0.id == id }),
+              let url = asset.fileURL,
+              FileManager.default.fileExists(atPath: url.path) else {
+            throw BridgeError.invalidParameters
+        }
+        return url
+    }
+
+    private func openAsset(_ params: [String: Any]) throws {
+        let url = try assetURL(from: params)
+        guard NSWorkspace.shared.open(url) else {
+            throw BridgeError.assetActionFailed("無法開啟圖片檔案。")
+        }
+    }
+
+    private func downloadAsset(_ params: [String: Any]) throws {
+        let sourceURL = try assetURL(from: params)
+        let asset = store.assets.first { $0.fileURL == sourceURL }
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: sourceURL.pathExtension) ?? .png
+        ]
+        panel.nameFieldStringValue = "\((asset?.title ?? sourceURL.deletingPathExtension().lastPathComponent)).\(sourceURL.pathExtension)"
+        panel.message = "將圖片儲存到"
+        guard panel.runModal() == .OK, let destinationURL = panel.url else { return }
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        store.statusMessage = "圖片已儲存至：\(destinationURL.path)"
+    }
+
+    private func copyAsset(_ params: [String: Any]) throws {
+        let sourceURL = try assetURL(from: params)
+        let data: Data
+        if sourceURL.pathExtension.lowercased() == "png" {
+            data = try Data(contentsOf: sourceURL)
+        } else {
+            guard let image = NSImage(contentsOf: sourceURL), let pngData = Self.pngData(from: image) else {
+                throw BridgeError.assetActionFailed("無法轉換圖片格式。")
+            }
+            data = pngData
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setData(data, forType: .png) else {
+            throw BridgeError.assetActionFailed("無法寫入系統剪貼簿。")
+        }
+        store.statusMessage = "圖片已複製到剪貼簿。"
+    }
+
+    private func shareAsset(_ params: [String: Any]) throws {
+        let url = try assetURL(from: params)
+        guard let webView else { throw BridgeError.assetActionFailed("分享介面尚未準備完成。") }
+        sharingPicker = NSSharingServicePicker(items: [url])
+        sharingPicker?.show(relativeTo: webView.bounds, of: webView, preferredEdge: .minY)
+    }
+
+    private func importPastedImage(_ params: [String: Any]) throws {
+        guard let dataURL = params["dataURL"] as? String,
+              let comma = dataURL.firstIndex(of: ","),
+              dataURL[..<comma].contains(";base64"),
+              let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])),
+              !data.isEmpty,
+              data.count <= 128 * 1_024 * 1_024 else {
+            throw BridgeError.invalidPastedImage
+        }
+
+        let header = String(dataURL[..<comma]).lowercased()
+        let originalFileExtension: String
+        if header.contains("image/jpeg") || header.contains("image/jpg") {
+            originalFileExtension = "jpg"
+        } else if header.contains("image/webp") {
+            originalFileExtension = "webp"
+        } else if header.contains("image/tiff") {
+            originalFileExtension = "tiff"
+        } else {
+            originalFileExtension = "png"
+        }
+        let normalized = try Self.normalizedClipboardImage(
+            data: data,
+            originalFileExtension: originalFileExtension,
+            maxLongEdge: 2_048
+        )
+
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        let directory = applicationSupport
+            .appendingPathComponent("GenImage", isDirectory: true)
+            .appendingPathComponent("Pasted", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(
+            "Pasted-\(UUID().uuidString.prefix(8)).\(normalized.fileExtension)"
+        )
+        try normalized.data.write(to: url, options: .atomic)
+        store.importImage(
+            url: url,
+            pixelWidth: normalized.pixelWidth,
+            pixelHeight: normalized.pixelHeight
+        )
+        if normalized.wasResized {
+            store.statusMessage = "剪貼簿圖片已等比例縮小至 \(normalized.pixelWidth) × \(normalized.pixelHeight) px。"
+        }
+        if params["describe"] as? Bool == true {
+            store.describeSelected()
+        }
+    }
+
+    private struct ClipboardImagePayload: Encodable {
+        let dataURL: String
+        let name: String?
+    }
+
+    private static func clipboardImagePayload(from pasteboard: NSPasteboard) -> ClipboardImagePayload? {
+        if let data = pasteboard.data(forType: .png), NSImage(data: data) != nil {
+            return clipboardImagePayload(pngData: data, name: nil)
+        }
+
+        if let data = pasteboard.data(forType: .tiff),
+           let image = NSImage(data: data),
+           let pngData = pngData(from: image) {
+            return clipboardImagePayload(pngData: pngData, name: nil)
+        }
+
+        let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true
+        ]
+        if let fileURL = (pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: fileOptions
+        ) as? [NSURL])?.first as URL?,
+           let image = NSImage(contentsOf: fileURL),
+           let pngData = pngData(from: image) {
+            return clipboardImagePayload(pngData: pngData, name: fileURL.lastPathComponent)
+        }
+
+        if let image = (pasteboard.readObjects(
+            forClasses: [NSImage.self],
+            options: nil
+        ) as? [NSImage])?.first,
+           let pngData = pngData(from: image) {
+            return clipboardImagePayload(pngData: pngData, name: nil)
+        }
+
+        return nil
+    }
+
+    private static func pngData(from image: NSImage) -> Data? {
+        guard let tiffData = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData) else {
+            return nil
+        }
+        return bitmap.representation(using: .png, properties: [:])
+    }
+
+    private static func clipboardImagePayload(
+        pngData: Data,
+        name: String?
+    ) -> ClipboardImagePayload? {
+        guard !pngData.isEmpty,
+              pngData.count <= 128 * 1_024 * 1_024,
+              let normalized = try? normalizedClipboardImage(
+                data: pngData,
+                originalFileExtension: "png",
+                maxLongEdge: 2_048
+              ) else { return nil }
+        return ClipboardImagePayload(
+            dataURL: "data:image/png;base64,\(normalized.data.base64EncodedString())",
+            name: name
+        )
+    }
+
+    private struct NormalizedClipboardImage {
+        var data: Data
+        var fileExtension: String
+        var pixelWidth: Int
+        var pixelHeight: Int
+        var wasResized: Bool
+    }
+
+    private static func normalizedClipboardImage(
+        data: Data,
+        originalFileExtension: String,
+        maxLongEdge: Int
+    ) throws -> NormalizedClipboardImage {
+        guard maxLongEdge > 0,
+              let source = CGImageSourceCreateWithData(data as CFData, [
+                kCGImageSourceShouldCache: false
+              ] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any],
+              let rawWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let rawHeight = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              rawWidth > 0,
+              rawHeight > 0 else {
+            throw BridgeError.invalidPastedImage
+        }
+
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        let swapsDimensions = (5...8).contains(orientation)
+        let displayWidth = swapsDimensions ? rawHeight : rawWidth
+        let displayHeight = swapsDimensions ? rawWidth : rawHeight
+        guard max(displayWidth, displayHeight) > maxLongEdge else {
+            return NormalizedClipboardImage(
+                data: data,
+                fileExtension: originalFileExtension,
+                pixelWidth: displayWidth,
+                pixelHeight: displayHeight,
+                wasResized: false
+            )
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxLongEdge,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            options as CFDictionary
+        ) else {
+            throw BridgeError.invalidPastedImage
+        }
+
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            output,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw BridgeError.invalidPastedImage
+        }
+        CGImageDestinationAddImage(destination, thumbnail, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw BridgeError.invalidPastedImage
+        }
+        return NormalizedClipboardImage(
+            data: output as Data,
+            fileExtension: "png",
+            pixelWidth: thumbnail.width,
+            pixelHeight: thumbnail.height,
+            wasResized: true
+        )
+    }
+
+    private func model(from params: [String: Any]) -> ModelDescriptor? {
+        guard let modelID = params["modelID"] as? String else { return nil }
+        return store.models.first { $0.id == modelID }
+    }
+
+    private func uuid(_ value: Any?) -> UUID? {
+        guard let string = value as? String else { return nil }
+        return UUID(uuidString: string)
+    }
+
+    private func integer(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String { return Int(string) }
+        return nil
+    }
+
+    private func double(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+
+    private func sendResponse(id: String) {
+        sendJavaScriptObject(["kind": "response", "id": id, "ok": true])
+    }
+
+    private func sendError(id: String?, message: String) {
+        var object: [String: Any] = ["kind": "response", "ok": false, "error": message]
+        if let id { object["id"] = id }
+        sendJavaScriptObject(object)
+    }
+
+    private func sendJavaScriptObject(_ object: [String: Any]) {
+        guard let webView,
+              JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.GenImageNative?.receive(\(json));")
+    }
+}
+
+extension HybridBridgeController: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "genimage",
+              let body = message.body as? [String: Any],
+              let method = body["method"] as? String else { return }
+
+        let id = body["id"] as? String
+        let params = body["params"] as? [String: Any] ?? [:]
+
+        do {
+            try handle(method: method, params: params)
+            if let id { sendResponse(id: id) }
+        } catch {
+            sendError(id: id, message: error.localizedDescription)
+        }
+    }
+}
+
+extension HybridBridgeController: WKNavigationDelegate {
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        pageReady = true
+        pushState()
+    }
+}
+
+private enum BridgeError: LocalizedError {
+    case invalidParameters
+    case invalidPastedImage
+    case assetActionFailed(String)
+    case unknownMethod(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidParameters: "Bridge 參數不完整。"
+        case .invalidPastedImage: "剪貼簿圖片格式無法讀取。"
+        case let .assetActionFailed(message): message
+        case let .unknownMethod(method): "未知的 Bridge 方法：\(method)"
+        }
+    }
+}
