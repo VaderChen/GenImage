@@ -539,6 +539,7 @@ public struct GenerationJob: Identifiable, Codable, Hashable, Sendable {
     public var createdAt: Date
     public var startedAt: Date?
     public var finishedAt: Date?
+    public var errorMessage: String?
 
     public init(
         id: UUID = UUID(),
@@ -548,7 +549,8 @@ public struct GenerationJob: Identifiable, Codable, Hashable, Sendable {
         progress: Double = 0,
         createdAt: Date = .now,
         startedAt: Date? = nil,
-        finishedAt: Date? = nil
+        finishedAt: Date? = nil,
+        errorMessage: String? = nil
     ) {
         self.id = id
         self.action = action
@@ -558,6 +560,7 @@ public struct GenerationJob: Identifiable, Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.startedAt = startedAt
         self.finishedAt = finishedAt
+        self.errorMessage = errorMessage
     }
 }
 

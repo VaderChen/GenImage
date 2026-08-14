@@ -152,7 +152,8 @@ public enum VideoGenerationValidationError: LocalizedError, Sendable {
 public struct VideoGenerationRequest: Sendable, Hashable {
     public var projectID: UUID
     public var recipeID: UUID
-    public var sourceAsset: ImageAsset?
+    public var sourceAssets: [ImageAsset]
+    public var sourceAsset: ImageAsset? { sourceAssets.first }
     public var options: VideoGenerationOptions
     public var profile: InferenceProfile
     public var modelURL: URL
@@ -162,6 +163,7 @@ public struct VideoGenerationRequest: Sendable, Hashable {
         projectID: UUID,
         recipeID: UUID,
         sourceAsset: ImageAsset?,
+        sourceAssets: [ImageAsset]? = nil,
         options: VideoGenerationOptions,
         profile: InferenceProfile,
         modelURL: URL,
@@ -169,7 +171,7 @@ public struct VideoGenerationRequest: Sendable, Hashable {
     ) {
         self.projectID = projectID
         self.recipeID = recipeID
-        self.sourceAsset = sourceAsset
+        self.sourceAssets = sourceAssets ?? (sourceAsset.map { [$0] } ?? [])
         self.options = options
         self.profile = profile
         self.modelURL = modelURL

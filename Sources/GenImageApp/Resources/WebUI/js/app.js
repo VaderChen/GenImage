@@ -1,4 +1,5 @@
 import { invoke, onClipboardImage, onState } from "./bridge.js";
+import { renderDownloads } from "./downloads.js";
 import { escapeHTML } from "./format.js";
 import { getLocale, setLocale, t } from "./i18n.js";
 import { renderModels } from "./models.js";
@@ -7,6 +8,7 @@ import { renderSettings } from "./settings.js";
 import { getTheme, setTheme } from "./themes.js";
 import {
   isInferenceBusy,
+  refreshJobsPanel,
   refreshJobTimings,
   renderQuickTools,
   renderWorkspace,
@@ -60,17 +62,33 @@ onState((nextState) => {
   const nextContentSignature = contentSignature(nextState);
   if (state && composingRecipeField) {
     const localRecipe = state.recipe;
+    const localVideoOutputSettings = state.videoOutputSettings;
     reconcileWorkspaceTabs(nextState);
-    state = { ...nextState, recipe: localRecipe };
+    state = {
+      ...nextState,
+      recipe: localRecipe,
+      videoOutputSettings: localVideoOutputSettings,
+    };
     stateContentSignature = nextContentSignature;
     renderDeferredDuringComposition = true;
     if (statusMessageChanged) scheduleStatusMessageDismiss(nextState.statusMessage);
     updateSystemMetricsDOM();
+    refreshJobsPanel(workspaceStateForActiveTab(state), root);
+    refreshToastDOM();
     return;
   }
   if (state && nextContentSignature === stateContentSignature) {
-    state = { ...nextState, recipe: state.recipe };
+    const localRecipe = state.recipe;
+    const localVideoOutputSettings = state.videoOutputSettings;
+    state = {
+      ...nextState,
+      recipe: localRecipe,
+      videoOutputSettings: localVideoOutputSettings,
+    };
+    if (statusMessageChanged) scheduleStatusMessageDismiss(nextState.statusMessage);
     updateSystemMetricsDOM();
+    refreshJobsPanel(workspaceStateForActiveTab(state), root);
+    refreshToastDOM();
     return;
   }
   const descriptionUpdated = state
@@ -106,6 +124,12 @@ root.addEventListener("click", async (event) => {
         ui.route = target.dataset.route;
         render();
         break;
+      case "openAvailableUpdate":
+        await invoke("openAvailableUpdate");
+        break;
+      case "dismissAvailableUpdate":
+        await invoke("dismissAvailableUpdate");
+        break;
       case "generate":
         await syncRecipe();
         ui.route = "workspace";
@@ -118,7 +142,11 @@ root.addEventListener("click", async (event) => {
         ui.route = "workspace";
         ui.previewMode = "single";
         setInspectorTab("jobs");
-        await invokeTrackedOutput("generateVideo", undefined, "generateVideo");
+        await invokeTrackedOutput(
+          "generateVideo",
+          { sourceAssetIDs: selectedVideoSourceAssetIDs() },
+          "generateVideo",
+        );
         break;
       case "describe":
         ui.route = "workspace";
@@ -147,9 +175,12 @@ root.addEventListener("click", async (event) => {
       case "selectAsset":
         ui.route = "workspace";
         ui.previewMode = "single";
-        setActiveTabSelection(target.dataset.assetId);
-        setInspectorTab("info");
-        await invoke("selectAsset", { assetID: target.dataset.assetId });
+        {
+          const primaryAssetID = setActiveTabSelection(target.dataset.assetId, event);
+          if (!primaryAssetID) break;
+          setInspectorTab("info");
+          await invoke("selectAsset", { assetID: primaryAssetID });
+        }
         break;
       case "removeAsset": {
         const assetID = target.dataset.assetId;
@@ -359,6 +390,45 @@ root.addEventListener("change", async (event) => {
     return;
   }
 
+  if (event.target.matches("[data-lora-scale]")) {
+    try {
+      await syncRecipe();
+    } catch (error) {
+      showBridgeError(error);
+    }
+    return;
+  }
+
+  const dimensionField = event.target.dataset.dimensionField;
+  if (dimensionField) {
+    try {
+      await (event.target.dataset.outputKind === "video"
+        ? syncVideoOutputSettings()
+        : syncRecipe());
+    } catch (error) {
+      showBridgeError(error);
+    }
+    return;
+  }
+
+  if (event.target.dataset.videoField) {
+    try {
+      await syncVideoOutputSettings();
+    } catch (error) {
+      showBridgeError(error);
+    }
+    return;
+  }
+
+  if (event.target.dataset.recipeField && event.target.tagName !== "TEXTAREA") {
+    try {
+      await syncRecipe();
+    } catch (error) {
+      showBridgeError(error);
+    }
+    return;
+  }
+
   const profileSelect = event.target.closest("[data-profile-capability]");
   if (profileSelect) {
     if (!profileSelect.value) return;
@@ -380,8 +450,6 @@ root.addEventListener("input", (event) => {
     state.recipe.loraScale = Math.min(1, Math.max(0, Number(event.target.value)));
     const output = root.querySelector("[data-lora-scale-value]");
     if (output) output.textContent = `${Math.round(state.recipe.loraScale * 100)}%`;
-    clearTimeout(recipeTimer);
-    recipeTimer = setTimeout(() => syncRecipe().catch(showBridgeError), 180);
     return;
   }
 
@@ -398,19 +466,12 @@ root.addEventListener("input", (event) => {
     settings.width = dimensions.width;
     settings.height = dimensions.height;
     updateResolutionControls(dimensions, outputKind);
-    clearTimeout(recipeTimer);
-    recipeTimer = setTimeout(
-      () => (outputKind === "video" ? syncVideoOutputSettings() : syncRecipe()).catch(showBridgeError),
-      180,
-    );
     return;
   }
 
   const videoField = event.target.dataset.videoField;
   if (videoField) {
     state.videoOutputSettings[videoField] = event.target.value;
-    clearTimeout(recipeTimer);
-    recipeTimer = setTimeout(() => syncVideoOutputSettings().catch(showBridgeError), 240);
     return;
   }
 
@@ -418,6 +479,7 @@ root.addEventListener("input", (event) => {
   if (recipeField) {
     state.recipe[recipeField] = event.target.value;
     if (event.isComposing || composingRecipeField === recipeField) return;
+    if (event.target.tagName !== "TEXTAREA") return;
     clearTimeout(recipeTimer);
     recipeTimer = setTimeout(() => syncRecipe().catch(showBridgeError), 240);
     return;
@@ -544,7 +606,10 @@ function render() {
   root.innerHTML = `
     <div class="app-shell">
       ${renderSidebar()}
-      <div class="main-view">${renderRoute()}</div>
+      <div class="main-view">
+        ${renderUpdateBanner()}
+        <div class="route-view">${renderRoute()}</div>
+      </div>
     </div>
     ${renderWorkspaceTabRenameDialog()}
     ${renderPasteDialog()}
@@ -601,7 +666,14 @@ function setInspectorTab(tab) {
 
 function makeWorkspaceTab() {
   const id = globalThis.crypto?.randomUUID?.() || `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return { id, name: formatWorkspaceTabName(new Date()), assetIDs: [], selectedAssetID: null };
+  return {
+    id,
+    name: formatWorkspaceTabName(new Date()),
+    assetIDs: [],
+    selectedAssetID: null,
+    selectedAssetIDs: [],
+    selectionAnchorID: null,
+  };
 }
 
 function formatWorkspaceTabName(date) {
@@ -622,6 +694,10 @@ function loadWorkspaceTabs() {
               : formatWorkspaceTabName(new Date(Date.now() + index * 1_000)),
             assetIDs: Array.isArray(tab.assetIDs) ? tab.assetIDs.filter((id) => typeof id === "string") : [],
             selectedAssetID: typeof tab.selectedAssetID === "string" ? tab.selectedAssetID : null,
+            selectedAssetIDs: Array.isArray(tab.selectedAssetIDs)
+              ? tab.selectedAssetIDs.filter((id) => typeof id === "string")
+              : [],
+            selectionAnchorID: typeof tab.selectionAnchorID === "string" ? tab.selectionAnchorID : null,
           }))
       : [];
     if (tabs.length) {
@@ -663,10 +739,21 @@ function reconcileWorkspaceTabs(nextState) {
   }
 
   const validAssetIDs = new Set(nextState.assets.map((asset) => asset.id));
+  const imageAssetIDs = new Set(
+    nextState.assets
+      .filter((asset) => asset.kind !== "generatedVideo")
+      .map((asset) => asset.id),
+  );
   const assignedAssetIDs = new Set();
   ui.workspaceTabs.forEach((tab) => {
     tab.assetIDs = tab.assetIDs.filter((id) => validAssetIDs.has(id) && !assignedAssetIDs.has(id));
     tab.assetIDs.forEach((id) => assignedAssetIDs.add(id));
+    tab.selectedAssetIDs = (tab.selectedAssetIDs || []).filter(
+      (id) => tab.assetIDs.includes(id) && imageAssetIDs.has(id),
+    );
+    if (!tab.selectionAnchorID || !tab.selectedAssetIDs.includes(tab.selectionAnchorID)) {
+      tab.selectionAnchorID = tab.selectedAssetIDs.at(-1) || null;
+    }
   });
 
   const unassignedAssetIDs = new Set(
@@ -726,7 +813,15 @@ function workspaceStateForActiveTab(sourceState) {
   const operations = sourceState.operations.filter((operation) =>
     operation.outputAssetIDs.some((id) => assetIDs.has(id)),
   );
-  return { ...sourceState, assets, selectedAssetID, comparisonAssetID, operations };
+  const selectedAssetIDs = (tab?.selectedAssetIDs || []).filter((id) => assetIDs.has(id));
+  return {
+    ...sourceState,
+    assets,
+    selectedAssetID,
+    selectedAssetIDs,
+    comparisonAssetID,
+    operations,
+  };
 }
 
 function addWorkspaceTab() {
@@ -769,6 +864,14 @@ async function closeWorkspaceTab(tabID) {
   if (!replacementTab.selectedAssetID && closingTab.selectedAssetID) {
     replacementTab.selectedAssetID = closingTab.selectedAssetID;
   }
+  replacementTab.selectedAssetIDs ||= [];
+  for (const assetID of closingTab.selectedAssetIDs || []) {
+    if (!replacementTab.selectedAssetIDs.includes(assetID)) {
+      replacementTab.selectedAssetIDs.push(assetID);
+    }
+  }
+  replacementTab.selectionAnchorID = closingTab.selectionAnchorID
+    || replacementTab.selectionAnchorID;
 
   ui.workspaceTabs.splice(index, 1);
   const closedActiveTab = ui.activeWorkspaceTabID === tabID;
@@ -809,11 +912,68 @@ function saveWorkspaceTabRename() {
   closeWorkspaceTabRename();
 }
 
-function setActiveTabSelection(assetID) {
+function setActiveTabSelection(assetID, event) {
   const tab = activeWorkspaceTab();
-  if (!tab || !tab.assetIDs.includes(assetID)) return;
-  tab.selectedAssetID = assetID;
+  if (!tab || !tab.assetIDs.includes(assetID)) return null;
+  const asset = state.assets.find((item) => item.id === assetID);
+  if (!asset) return null;
+
+  const isImage = asset.kind !== "generatedVideo";
+  const additive = Boolean(event?.metaKey || event?.ctrlKey);
+  const rangeSelection = Boolean(event?.shiftKey && isImage);
+  let selectedAssetIDs = (tab.selectedAssetIDs || []).filter((id) => isImageAssetID(id));
+
+  if (rangeSelection) {
+    const imageIDs = tab.assetIDs.filter((id) => isImageAssetID(id));
+    const anchorID = imageIDs.includes(tab.selectionAnchorID)
+      ? tab.selectionAnchorID
+      : imageIDs.includes(tab.selectedAssetID)
+        ? tab.selectedAssetID
+        : assetID;
+    const start = imageIDs.indexOf(anchorID);
+    const end = imageIDs.indexOf(assetID);
+    const rangeIDs = imageIDs.slice(Math.min(start, end), Math.max(start, end) + 1);
+    selectedAssetIDs = additive
+      ? [...selectedAssetIDs, ...rangeIDs.filter((id) => !selectedAssetIDs.includes(id))]
+      : rangeIDs;
+  } else if (additive && isImage) {
+    if (!selectedAssetIDs.length && isImageAssetID(tab.selectedAssetID)) {
+      selectedAssetIDs.push(tab.selectedAssetID);
+    }
+    const index = selectedAssetIDs.indexOf(assetID);
+    if (index >= 0 && selectedAssetIDs.length > 1) {
+      selectedAssetIDs.splice(index, 1);
+    } else if (index < 0) {
+      selectedAssetIDs.push(assetID);
+    }
+    tab.selectionAnchorID = assetID;
+  } else {
+    selectedAssetIDs = isImage ? [assetID] : [];
+    tab.selectionAnchorID = isImage ? assetID : null;
+  }
+
+  tab.selectedAssetIDs = selectedAssetIDs;
+  tab.selectedAssetID = selectedAssetIDs.includes(assetID) || !isImage
+    ? assetID
+    : selectedAssetIDs.at(-1) || assetID;
   saveWorkspaceTabs();
+  return tab.selectedAssetID;
+}
+
+function isImageAssetID(assetID) {
+  return state.assets.some((asset) => asset.id === assetID && asset.kind !== "generatedVideo");
+}
+
+function selectedVideoSourceAssetIDs() {
+  const workspaceState = workspaceStateForActiveTab(state);
+  const imageIDs = new Set(
+    workspaceState.assets
+      .filter((asset) => asset.kind !== "generatedVideo")
+      .map((asset) => asset.id),
+  );
+  const selected = (workspaceState.selectedAssetIDs || []).filter((id) => imageIDs.has(id));
+  if (selected.length) return selected;
+  return imageIDs.has(workspaceState.selectedAssetID) ? [workspaceState.selectedAssetID] : [];
 }
 
 function replacementAssetIDAfterRemoval(assetID) {
@@ -828,6 +988,10 @@ function replacementAssetIDAfterRemoval(assetID) {
 function removeAssetFromWorkspaceTabs(assetID, activeReplacementID) {
   ui.workspaceTabs.forEach((tab) => {
     tab.assetIDs = tab.assetIDs.filter((id) => id !== assetID);
+    tab.selectedAssetIDs = (tab.selectedAssetIDs || []).filter((id) => id !== assetID);
+    if (tab.selectionAnchorID === assetID) {
+      tab.selectionAnchorID = tab.selectedAssetIDs.at(-1) || null;
+    }
     if (tab.selectedAssetID !== assetID) return;
     tab.selectedAssetID = tab.id === ui.activeWorkspaceTabID
       ? activeReplacementID
@@ -957,6 +1121,7 @@ function renderSidebar() {
         ${navButton("workspace", "▦", t("nav.workspace"))}
         ${navButton("models", "⬡", t("nav.models"))}
         ${navButton("profiles", "⇄", t("nav.profiles"))}
+        ${navButton("downloads", "⇩", t("nav.downloads"))}
         ${navButton("settings", "⚙", t("nav.settings"))}
       </nav>
       <section class="sidebar-tool-section">
@@ -978,8 +1143,28 @@ function renderSidebar() {
 function renderRoute() {
   if (ui.route === "models") return renderModels(state, ui);
   if (ui.route === "profiles") return renderProfiles(state);
+  if (ui.route === "downloads") return renderDownloads(state);
   if (ui.route === "settings") return renderSettings(state, ui);
   return renderWorkspace(workspaceStateForActiveTab(state), ui);
+}
+
+function renderUpdateBanner() {
+  const update = state.availableUpdate;
+  if (!update) return "";
+  return `<aside class="update-banner" role="status">
+    <span class="update-banner-icon" aria-hidden="true">⬆</span>
+    <div class="update-banner-copy">
+      <strong>${t("update.available", { version: update.latestVersion })}</strong>
+      <span>${t("update.current", { version: update.currentVersion })} · ${escapeHTML(update.releaseName)}</span>
+    </div>
+    <button class="update-banner-action" data-action="openAvailableUpdate">${t("update.openRelease")}</button>
+    <button
+      class="update-banner-dismiss"
+      data-action="dismissAvailableUpdate"
+      title="${t("update.dismiss")}"
+      aria-label="${t("update.dismiss")}"
+    >×</button>
+  </aside>`;
 }
 
 function renderSystemMetrics() {
@@ -1018,7 +1203,22 @@ function metricDisplay(value) {
 }
 
 function contentSignature(value) {
-  const { systemMetrics: _systemMetrics, ...content } = value;
+  const {
+    systemMetrics: _systemMetrics,
+    jobs: _jobs,
+    statusMessage: _statusMessage,
+    ...content
+  } = value;
+  if (ui.route === "workspace") {
+    content.models = value.models.map(({ descriptor, installation }) => ({
+      descriptor,
+      installationGroup: installation.phase === "installed"
+        ? "installed"
+        : installation.phase === "notInstalled"
+          ? "notInstalled"
+          : "active",
+    }));
+  }
   return JSON.stringify(sortForSignature(content));
 }
 
@@ -1119,6 +1319,21 @@ function navButton(route, icon, title) {
 function renderToast() {
   if (!state.statusMessage) return "";
   return `<div class="toast"><span style="color:var(--positive)">●</span><span>${escapeHTML(state.statusMessage)}</span><button data-action="clearStatus">×</button></div>`;
+}
+
+function refreshToastDOM() {
+  const currentToast = root.querySelector(".toast");
+  const markup = renderToast();
+  if (!markup) {
+    currentToast?.remove();
+    return;
+  }
+  const template = document.createElement("template");
+  template.innerHTML = markup.trim();
+  const nextToast = template.content.firstElementChild;
+  if (!nextToast) return;
+  if (currentToast) currentToast.replaceWith(nextToast);
+  else root.append(nextToast);
 }
 
 function scheduleStatusMessageDismiss(message) {

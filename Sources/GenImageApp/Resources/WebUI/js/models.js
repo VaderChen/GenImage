@@ -78,7 +78,7 @@ export function renderModels(state, ui) {
   `;
 }
 
-function renderModelCard({ descriptor, installation }) {
+export function renderModelCard({ descriptor, installation }) {
   const capabilities = descriptor.capabilities
     .map((capability) => `<span class="badge capability-badge">${capabilityLabel(capability)}</span>`)
     .join("");
@@ -106,6 +106,9 @@ function renderModelCard({ descriptor, installation }) {
 
 function renderInstallation(model, installation) {
   const phase = installation.phase;
+  const error = installation.errorMessage
+    ? `<span class="model-installation-error">${escapeHTML(installation.errorMessage)}</span>`
+    : "";
   const progress = `
     <div class="model-progress">
       <div class="detail-row"><span>${phaseLabel(phase)}</span><span>${gigabytes(installation.downloadedGB)} / ${gigabytes(model.approximateDownloadGB)}</span></div>
@@ -127,7 +130,7 @@ function renderInstallation(model, installation) {
   if (phase === "paused") {
     return `${progress}<button class="install-button compact" data-action="installModel" data-model-id="${escapeHTML(model.id)}">${t("model.resume")}</button>`;
   }
-  return `<button class="install-button compact" data-action="installModel" data-model-id="${escapeHTML(model.id)}">${t("model.install")}</button>`;
+  return `${error}<button class="install-button compact" data-action="installModel" data-model-id="${escapeHTML(model.id)}">${t("model.install")}</button>`;
 }
 
 function isLocalPathModelID(modelID) {

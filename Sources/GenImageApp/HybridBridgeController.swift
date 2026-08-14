@@ -161,12 +161,17 @@ final class HybridBridgeController: NSObject, ObservableObject {
             store.generate(linkToSelectedAsset: params["linkToSelectedAsset"] as? Bool ?? false)
 
         case "generateVideo":
+            let sourceAssetIDs = (params["sourceAssetIDs"] as? [String] ?? [])
+                .compactMap { UUID(uuidString: $0) }
             let hasImageToVideo = store.activeProfile(for: .imageToVideo) != nil
             let hasTextToVideo = store.activeProfile(for: .textToVideo) != nil
-            if store.selectedSourceImage == nil, hasImageToVideo, !hasTextToVideo {
+            if sourceAssetIDs.isEmpty,
+               store.selectedSourceImage == nil,
+               hasImageToVideo,
+               !hasTextToVideo {
                 performSourceImageAction(.imageToVideo)
             } else {
-                store.requestVideoGeneration()
+                store.requestVideoGeneration(sourceAssetIDs: sourceAssetIDs)
             }
 
         case "describe":
@@ -282,6 +287,15 @@ final class HybridBridgeController: NSObject, ObservableObject {
             guard let id = uuid(params["profileID"]) else { throw BridgeError.invalidParameters }
             store.deleteProfile(id)
 
+        case "openAvailableUpdate":
+            guard let update = store.availableUpdate,
+                  NSWorkspace.shared.open(update.releaseURL) else {
+                throw BridgeError.assetActionFailed("無法開啟 GitHub Release 頁面。")
+            }
+
+        case "dismissAvailableUpdate":
+            store.dismissAvailableUpdate()
+
         case "clearStatus":
             store.statusMessage = nil
 
@@ -355,26 +369,40 @@ final class HybridBridgeController: NSObject, ObservableObject {
     private func importImage(then action: SourceImageAction?) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = false
+        switch action {
+        case nil, .imageToVideo:
+            panel.allowsMultipleSelection = true
+        default:
+            panel.allowsMultipleSelection = false
+        }
         panel.canChooseDirectories = false
-        panel.message = "選擇要加入 GenImage 工作區的圖片"
+        panel.message = panel.allowsMultipleSelection
+            ? "選擇一張或多張要加入 GenImage 工作區的圖片"
+            : "選擇要加入 GenImage 工作區的圖片"
 
-        guard panel.runModal() == .OK, let url = panel.url, let image = NSImage(contentsOf: url) else {
+        guard panel.runModal() == .OK else {
             return
         }
-        let representation = image.representations.max {
-            $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh
+        var importedAssetIDs: [UUID] = []
+        for url in panel.urls {
+            guard let image = NSImage(contentsOf: url) else { continue }
+            let representation = image.representations.max {
+                $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh
+            }
+            let assetID = store.importImage(
+                url: url,
+                pixelWidth: representation?.pixelsWide ?? Int(image.size.width),
+                pixelHeight: representation?.pixelsHigh ?? Int(image.size.height)
+            )
+            importedAssetIDs.append(assetID)
         }
-        store.importImage(
-            url: url,
-            pixelWidth: representation?.pixelsWide ?? Int(image.size.width),
-            pixelHeight: representation?.pixelsHigh ?? Int(image.size.height)
-        )
+        guard !importedAssetIDs.isEmpty else { return }
 
         switch action {
         case .describe: store.describeSelected()
         case .imageToImage: store.imageToImageSelected()
-        case .imageToVideo: store.requestVideoGeneration()
+        case .imageToVideo:
+            store.requestVideoGeneration(sourceAssetIDs: importedAssetIDs)
         case .upscale: store.upscaleSelected()
         default: break
         }

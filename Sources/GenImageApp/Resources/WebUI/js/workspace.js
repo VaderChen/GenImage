@@ -122,28 +122,28 @@ function renderCreationPanel(state, ui) {
         ${
           showGenerateText
             ? `<button
-                class="secondary-button creation-generate-button"
+                class="secondary-button creation-generate-button creation-generate-text"
                 data-action="describe"
                 ${inferenceDisabledAttribute}
               >⌕ ${t("workspace.generateText")}</button>`
             : ""
         }
         ${
-          showGenerateVideo
-            ? `<button
-                class="${showGenerateImage ? "secondary-button" : "primary-button"} creation-generate-button"
-                data-action="generateVideo"
-                ${inferenceDisabledAttribute}
-              >▶ ${t("workspace.generateVideo")}</button>`
-            : ""
-        }
-        ${
           showGenerateImage
             ? `<button
-                class="primary-button creation-generate-button"
+                class="primary-button creation-generate-button creation-generate-image"
                 data-action="generate"
                 ${inferenceDisabledAttribute}
               >✦ ${t("workspace.generate")}</button>`
+            : ""
+        }
+        ${
+          showGenerateVideo
+            ? `<button
+                class="secondary-button creation-generate-button creation-generate-video"
+                data-action="generateVideo"
+                ${inferenceDisabledAttribute}
+              >▶ ${t("workspace.generateVideo")}</button>`
             : ""
         }
       </div>
@@ -276,7 +276,7 @@ function renderOutputSettings(settings, outputKind) {
           ${
             isVideo
               ? `<div class="output-parameter-primary-row">
-                  ${numberField(t("workspace.frameCount"), "frameCount", settings.frameCount, 1, 512, outputKind)}
+                  ${numberField(t("workspace.frameCount"), "frameCount", settings.frameCount, 1, 512, outputKind, 8)}
                   ${numberField(t("workspace.frameRate"), "frameRate", settings.frameRate, 1, 120, outputKind)}
                 </div>`
               : ""
@@ -477,9 +477,16 @@ function renderPreviewContent(state, ui) {
 }
 
 function renderAssetCard(asset, state) {
+  const selection = assetSelection(asset, state);
   return `
-    <button class="asset-card ${asset.id === state.selectedAssetID ? "selected" : ""}" data-action="selectAsset" data-asset-id="${asset.id}">
+    <button
+      class="asset-card ${selection.classes}"
+      data-action="selectAsset"
+      data-asset-id="${asset.id}"
+      aria-pressed="${selection.selected}"
+    >
       ${renderArtwork(asset)}
+      ${selection.badge}
       <div class="asset-caption">
         <div class="asset-caption-copy">
           <strong>${escapeHTML(asset.title)}</strong>
@@ -553,14 +560,17 @@ function renderFilmstrip(state) {
   return `<div class="filmstrip" data-scroll-id="filmstrip">
     ${state.assets
       .map(
-        (asset) => `
+        (asset) => {
+          const selection = assetSelection(asset, state);
+          return `
           <div class="film-thumb-shell">
             <button
-              class="film-thumb ${asset.id === state.selectedAssetID ? "selected" : ""}"
+              class="film-thumb ${selection.classes}"
               data-action="selectAsset"
               data-asset-id="${asset.id}"
-              title="${escapeHTML(asset.title)}"
-            >${renderArtwork(asset)}</button>
+              title="${escapeHTML(asset.title)} · ⌘/Ctrl ${t("preview.multiSelectHint")}"
+              aria-pressed="${selection.selected}"
+            >${renderArtwork(asset)}${selection.badge}</button>
             <button
               class="film-thumb-remove"
               data-action="removeAsset"
@@ -569,10 +579,26 @@ function renderFilmstrip(state) {
               aria-label="${t("preview.removeImage")}"
             >×</button>
           </div>
-        `,
+        `;
+        },
       )
       .join("")}
   </div>`;
+}
+
+function assetSelection(asset, state) {
+  const anchorIndex = (state.selectedAssetIDs || []).indexOf(asset.id);
+  const primary = asset.id === state.selectedAssetID;
+  const selected = primary || anchorIndex >= 0;
+  const classes = [
+    selected ? "selected" : "",
+    primary ? "primary-selection" : "",
+    anchorIndex >= 0 ? "video-anchor" : "",
+  ].filter(Boolean).join(" ");
+  const badge = anchorIndex >= 0
+    ? `<span class="video-anchor-order" aria-label="${t("preview.anchorNumber", { count: anchorIndex + 1 })}">${anchorIndex + 1}</span>`
+    : "";
+  return { badge, classes, selected };
 }
 
 export function isInferenceBusy(state) {
@@ -686,6 +712,20 @@ function renderJobsPanel(state) {
   `;
 }
 
+export function refreshJobsPanel(state, container = document) {
+  const currentPanel = container.querySelector(".inspector-jobs");
+  if (!currentPanel) return;
+  const currentList = currentPanel.querySelector(".inspector-job-list");
+  const scrollTop = currentList?.scrollTop || 0;
+  const template = document.createElement("template");
+  template.innerHTML = renderJobsPanel(state).trim();
+  const nextPanel = template.content.firstElementChild;
+  if (!nextPanel) return;
+  currentPanel.replaceWith(nextPanel);
+  const nextList = nextPanel.querySelector(".inspector-job-list");
+  if (nextList) nextList.scrollTop = scrollTop;
+}
+
 function renderJob(job) {
   const cancellable = job.state === "running" || job.state === "queued";
   return `
@@ -700,6 +740,7 @@ function renderJob(job) {
       <span class="section-note job-status-line">
         ${jobLabel(job.state)} · ${percent(job.progress)}<span data-job-timing="${escapeHTML(job.id)}">${escapeHTML(jobTimingSuffix(job))}</span>
       </span>
+      ${job.errorMessage ? `<span class="job-error-message" title="${escapeHTML(job.errorMessage)}">${escapeHTML(job.errorMessage)}</span>` : ""}
     </div>
   `;
 }
@@ -836,7 +877,7 @@ function formatDuration(milliseconds, roundUp = false) {
     : `${twoDigits(minutes)}:${twoDigits(seconds)}`;
 }
 
-function numberField(label, field, value, min, max, outputKind) {
+function numberField(label, field, value, min, max, outputKind, step = 1) {
   return `<div class="field-group">
     <label for="${outputKind}-${field}">${label}</label>
     <input
@@ -845,6 +886,7 @@ function numberField(label, field, value, min, max, outputKind) {
       type="number"
       min="${min}"
       max="${max}"
+      step="${step}"
       ${settingsFieldAttribute(outputKind, field)}
       data-preserve-focus="${outputKind}-${field}"
       value="${value}"

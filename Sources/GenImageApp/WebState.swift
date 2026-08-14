@@ -106,6 +106,7 @@ struct WebAppState: Encodable {
     let activeProfileIDs: [String: UUID]
     let operations: [WebOperation]
     let statusMessage: String?
+    let availableUpdate: AppUpdateInfo?
     let systemMetrics: SystemMetricsSnapshot
 
     @MainActor
@@ -141,6 +142,7 @@ struct WebAppState: Encodable {
             )
         }
         statusMessage = store.statusMessage
+        availableUpdate = store.availableUpdate
         systemMetrics = store.systemMetrics
     }
 }

@@ -150,11 +150,13 @@ final class AppStore: ObservableObject {
     @Published var modelFilter: ModelFilter = .all
     @Published var statusMessage: String?
     @Published var systemMetrics: SystemMetricsSnapshot = .unavailable
+    @Published var availableUpdate: AppUpdateInfo?
 
     private var jobTasks: [UUID: Task<Void, Never>] = [:]
     private var modelTasks: [String: Task<Void, Never>] = [:]
     private var modelTaskTokens: [String: UUID] = [:]
     private var systemMetricsTask: Task<Void, Never>?
+    private var updateCheckTask: Task<Void, Never>?
     private let textToImageService: any TextToImageGenerating
     private let imageToTextService: any ImageDescribing
     private let imageToImageService: any ImageToImageGenerating
@@ -284,6 +286,20 @@ final class AppStore: ObservableObject {
         comparisonAssetID = nil
         operations = []
         startSystemMetricsUpdates()
+        checkForUpdates()
+    }
+
+    func checkForUpdates() {
+        updateCheckTask?.cancel()
+        updateCheckTask = Task { [weak self] in
+            let update = await AppUpdateChecker.availableUpdate()
+            guard !Task.isCancelled else { return }
+            self?.availableUpdate = update
+        }
+    }
+
+    func dismissAvailableUpdate() {
+        availableUpdate = nil
     }
 
     private static func loadRecipeSettings() -> PersistedRecipeSettings? {
@@ -594,6 +610,20 @@ final class AppStore: ObservableObject {
         return asset
     }
 
+    private func sourceImages(for assetIDs: [UUID]) -> [ImageAsset] {
+        var seen = Set<UUID>()
+        return assetIDs.compactMap { assetID in
+            guard seen.insert(assetID).inserted,
+                  let asset = assets.first(where: { $0.id == assetID }),
+                  asset.kind != .generatedVideo,
+                  let fileURL = asset.fileURL,
+                  FileManager.default.fileExists(atPath: fileURL.path) else {
+                return nil
+            }
+            return asset
+        }
+    }
+
     var comparisonAsset: ImageAsset? {
         guard let comparisonAssetID else { return nil }
         return assets.first { $0.id == comparisonAssetID }
@@ -711,7 +741,10 @@ final class AppStore: ObservableObject {
         updated.height = profile.defaults.height ?? updated.height
         updated.steps = profile.defaults.steps ?? updated.steps
         updated.outputCount = profile.defaults.outputCount ?? updated.outputCount
-        updated.frameCount = profile.defaults.frameCount ?? updated.frameCount
+        updated.frameCount = normalizedVideoFrameCount(
+            profile.defaults.frameCount ?? updated.frameCount,
+            for: profile
+        )
         updated.frameRate = profile.defaults.frameRate ?? updated.frameRate
         videoOutputSettings = updated
     }
@@ -738,27 +771,62 @@ final class AppStore: ObservableObject {
         if let height { updated.height = min(max((height / 16) * 16, 64), 4096) }
         if let steps { updated.steps = min(max(steps, 1), 100) }
         if let outputCount { updated.outputCount = min(max(outputCount, 1), 8) }
-        if let frameCount { updated.frameCount = min(max(frameCount, 1), 512) }
+        if let frameCount {
+            updated.frameCount = normalizedVideoFrameCount(
+                frameCount,
+                for: preferredVideoProfile
+            )
+            if updated.frameCount != frameCount {
+                statusMessage = "LTX-2.3 幀數已從 \(frameCount) 自動調整為合法值 \(updated.frameCount)（8n+1）。"
+            }
+        }
         if let frameRate { updated.frameRate = min(max(frameRate, 1), 120) }
         if let seed { updated.seed = seed }
         videoOutputSettings = updated
     }
 
-    func requestVideoGeneration() {
-        guard ensureInferenceIdle() else { return }
-        guard let profile = preferredVideoProfile else {
-            statusMessage = "請先啟用文生影或圖生影 Profile。"
-            return
+    private func normalizedVideoFrameCount(
+        _ frameCount: Int,
+        for profile: InferenceProfile?
+    ) -> Int {
+        let clamped = min(max(frameCount, 1), 512)
+        guard profile?.modelID.lowercased().contains("ltx-2.3-mlx") == true else {
+            return clamped
         }
-        let sourceAsset: ImageAsset?
-        if profile.capability == .imageToVideo {
-            guard let selectedSourceImage else {
-                statusMessage = "圖生影需要先匯入或選取一張圖片。"
+        return LTXVideoGenerationService.normalizedFrameCount(clamped)
+    }
+
+    func requestVideoGeneration(sourceAssetIDs: [UUID] = []) {
+        guard ensureInferenceIdle() else { return }
+        let profile: InferenceProfile
+        let sourceAssets: [ImageAsset]
+        if sourceAssetIDs.isEmpty {
+            guard let preferredVideoProfile else {
+                statusMessage = "請先啟用文生影或圖生影 Profile。"
                 return
             }
-            sourceAsset = selectedSourceImage
+            profile = preferredVideoProfile
+            if profile.capability == .imageToVideo {
+                guard let selectedSourceImage else {
+                    statusMessage = "圖生影需要先匯入或選取至少一張圖片。"
+                    return
+                }
+                sourceAssets = [selectedSourceImage]
+            } else {
+                sourceAssets = []
+            }
         } else {
-            sourceAsset = nil
+            let resolvedSourceAssets = sourceImages(for: sourceAssetIDs)
+            guard resolvedSourceAssets.count == Set(sourceAssetIDs).count else {
+                statusMessage = "部分圖生影錨點已不存在或不是可用圖片，請重新選取。"
+                return
+            }
+            guard let imageToVideoProfile = activeProfile(for: .imageToVideo) else {
+                statusMessage = "已選取圖片錨點，請先啟用圖生影 Profile。"
+                return
+            }
+            profile = imageToVideoProfile
+            sourceAssets = resolvedSourceAssets
         }
         guard isProfileReady(profile) else { return }
         guard let model = models.first(where: { $0.id == profile.modelID }) else {
@@ -771,13 +839,21 @@ final class AppStore: ObservableObject {
         }
         guard let profileLoRAs = resolvedVideoLoRAs(for: profile) else { return }
 
+        let normalizedFrameCount = normalizedVideoFrameCount(
+            videoOutputSettings.frameCount,
+            for: profile
+        )
+        if normalizedFrameCount != videoOutputSettings.frameCount {
+            videoOutputSettings.frameCount = normalizedFrameCount
+        }
+
         let options = VideoGenerationOptions(
             prompt: recipe.prompt,
             width: videoOutputSettings.width,
             height: videoOutputSettings.height,
             steps: videoOutputSettings.steps,
             outputCount: videoOutputSettings.outputCount,
-            frameCount: videoOutputSettings.frameCount,
+            frameCount: normalizedFrameCount,
             frameRate: videoOutputSettings.frameRate,
             seed: videoOutputSettings.seed
         )
@@ -790,11 +866,17 @@ final class AppStore: ObservableObject {
 
         let projectID = selectedProjectID
         let recipeID = recipe.id
+        let jobTitle: String
+        if profile.capability == .imageToVideo {
+            jobTitle = sourceAssets.count == 1
+                ? "從「\(sourceAssets[0].title)」生成影片"
+                : "使用 \(sourceAssets.count) 張圖片錨點生成影片"
+        } else {
+            jobTitle = "生成 \(options.outputCount) 部影片"
+        }
         let job = GenerationJob(
             action: .generateVideo,
-            title: profile.capability == .imageToVideo
-                ? "從「\(sourceAsset?.title ?? "圖片")」生成影片"
-                : "生成 \(options.outputCount) 部影片"
+            title: jobTitle
         )
         jobs.append(job)
         updateJob(job.id) {
@@ -805,7 +887,8 @@ final class AppStore: ObservableObject {
         let request = VideoGenerationRequest(
             projectID: projectID,
             recipeID: recipeID,
-            sourceAsset: sourceAsset,
+            sourceAsset: sourceAssets.first,
+            sourceAssets: sourceAssets,
             options: options,
             profile: profile,
             modelURL: modelURL,
@@ -839,7 +922,7 @@ final class AppStore: ObservableObject {
                             id: operationID,
                             projectID: projectID,
                             action: .generateVideo,
-                            inputAssetID: sourceAsset?.id,
+                            inputAssetID: sourceAssets.first?.id,
                             outputAssetIDs: newAssets.map(\.id),
                             recipeID: recipeID,
                             profileSnapshot: profile
@@ -871,7 +954,10 @@ final class AppStore: ObservableObject {
                           jobs.first(where: { $0.id == jobID })?.state == .running else {
                         return
                     }
-                    updateJob(jobID) { $0.state = .failed }
+                    updateJob(jobID) {
+                        $0.state = .failed
+                        $0.errorMessage = message
+                    }
                     statusMessage = "影片生成失敗：\(message)"
                 }
             }
@@ -896,8 +982,12 @@ final class AppStore: ObservableObject {
         }
         jobTasks[jobID]?.cancel()
         jobTasks[jobID] = nil
-        updateJob(jobID) { $0.state = .failed }
-        statusMessage = "影片生成 Runtime 在 15 秒內未啟動，任務已自動停止；請重新執行。"
+        let message = "影片生成 Runtime 在 15 秒內未啟動，任務已自動停止；請重新執行。"
+        updateJob(jobID) {
+            $0.state = .failed
+            $0.errorMessage = message
+        }
+        statusMessage = message
     }
 
     func chooseSize(width: Int, height: Int) {
@@ -952,7 +1042,8 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func importImage(url: URL, pixelWidth: Int, pixelHeight: Int) {
+    @discardableResult
+    func importImage(url: URL, pixelWidth: Int, pixelHeight: Int) -> UUID {
         let asset = ImageAsset(
             projectID: selectedProjectID,
             kind: .imported,
@@ -971,6 +1062,7 @@ final class AppStore: ObservableObject {
         )
         selectAsset(asset.id)
         statusMessage = "已匯入「\(asset.title)」；可以執行圖生文、圖生圖、圖生影或 Upscale。"
+        return asset.id
     }
 
     func describeSelected() {
@@ -1026,8 +1118,12 @@ final class AppStore: ObservableObject {
             } catch is CancellationError {
                 updateJob(job.id) { $0.state = .cancelled }
             } catch {
-                updateJob(job.id) { $0.state = .failed }
-                statusMessage = "圖生文失敗：\(error.localizedDescription)"
+                let message = error.localizedDescription
+                updateJob(job.id) {
+                    $0.state = .failed
+                    $0.errorMessage = message
+                }
+                statusMessage = "圖生文失敗：\(message)"
             }
             jobTasks[job.id] = nil
         }
@@ -1102,8 +1198,12 @@ final class AppStore: ObservableObject {
             } catch is CancellationError {
                 updateJob(job.id) { $0.state = .cancelled }
             } catch {
-                updateJob(job.id) { $0.state = .failed }
-                statusMessage = "文生圖失敗：\(error.localizedDescription)"
+                let message = error.localizedDescription
+                updateJob(job.id) {
+                    $0.state = .failed
+                    $0.errorMessage = message
+                }
+                statusMessage = "文生圖失敗：\(message)"
             }
             jobTasks[job.id] = nil
         }
@@ -1187,8 +1287,12 @@ final class AppStore: ObservableObject {
             } catch is CancellationError {
                 updateJob(job.id) { $0.state = .cancelled }
             } catch {
-                updateJob(job.id) { $0.state = .failed }
-                statusMessage = "圖生圖失敗：\(error.localizedDescription)"
+                let message = error.localizedDescription
+                updateJob(job.id) {
+                    $0.state = .failed
+                    $0.errorMessage = message
+                }
+                statusMessage = "圖生圖失敗：\(message)"
             }
             jobTasks[job.id] = nil
         }
@@ -1276,8 +1380,12 @@ final class AppStore: ObservableObject {
             } catch is CancellationError {
                 updateJob(job.id) { $0.state = .cancelled }
             } catch {
-                updateJob(job.id) { $0.state = .failed }
-                statusMessage = "Upscale 失敗：\(error.localizedDescription)"
+                let message = error.localizedDescription
+                updateJob(job.id) {
+                    $0.state = .failed
+                    $0.errorMessage = message
+                }
+                statusMessage = "Upscale 失敗：\(message)"
             }
             jobTasks[job.id] = nil
         }

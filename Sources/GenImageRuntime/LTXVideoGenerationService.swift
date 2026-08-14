@@ -5,6 +5,18 @@ import GenImageCore
 public final class LTXVideoGenerationService: VideoGenerating, Sendable {
     private let outputDirectory: URL
 
+    public static func isValidFrameCount(_ frameCount: Int) -> Bool {
+        (1...512).contains(frameCount) && frameCount % 8 == 1
+    }
+
+    public static func normalizedFrameCount(_ frameCount: Int) -> Int {
+        let clamped = min(max(frameCount, 1), 512)
+        let lower = ((clamped - 1) / 8) * 8 + 1
+        let upper = lower + 8 <= 512 ? lower + 8 : lower
+        guard upper != lower else { return lower }
+        return clamped - lower < upper - clamped ? lower : upper
+    }
+
     public init(outputDirectory: URL) {
         self.outputDirectory = outputDirectory
     }
@@ -25,13 +37,25 @@ public final class LTXVideoGenerationService: VideoGenerating, Sendable {
         guard request.profile.modelID.lowercased().contains("ltx-2.3-mlx") else {
             throw LTXVideoRuntimeError.unsupportedModel(request.profile.modelID)
         }
-        guard request.options.frameCount % 8 == 1 else {
+        guard Self.isValidFrameCount(request.options.frameCount) else {
             throw LTXVideoRuntimeError.invalidFrameCount(request.options.frameCount)
         }
+        let sourceAssets = Self.uniqueSourceAssets(request.sourceAssets)
         if request.profile.capability == .imageToVideo {
-            guard let inputURL = request.sourceAsset?.fileURL,
-                  FileManager.default.fileExists(atPath: inputURL.path) else {
+            guard !sourceAssets.isEmpty else {
                 throw LTXVideoRuntimeError.missingInputFile
+            }
+            guard sourceAssets.count <= request.options.frameCount else {
+                throw LTXVideoRuntimeError.tooManyImageAnchors(
+                    count: sourceAssets.count,
+                    frameCount: request.options.frameCount
+                )
+            }
+            for asset in sourceAssets {
+                guard let inputURL = asset.fileURL,
+                      FileManager.default.fileExists(atPath: inputURL.path) else {
+                    throw LTXVideoRuntimeError.missingInputFile
+                }
             }
         }
         let manifestURL = request.modelURL.appendingPathComponent("genimage-model.json")
@@ -334,13 +358,34 @@ public final class LTXVideoGenerationService: VideoGenerating, Sendable {
                     String(lora.conditioningScale)
                 ])
             }
+            arguments.append(contentsOf: ["--upsample-only", "--refine-steps", "3"])
         }
         if let gemmaModel = ProcessInfo.processInfo.environment["GENIMAGE_LTX_GEMMA_MODEL"],
            !gemmaModel.isEmpty {
             arguments.append(contentsOf: ["--gemma", gemmaModel])
         }
-        if let inputURL = request.sourceAsset?.fileURL {
-            arguments.append(contentsOf: ["--image", inputURL.path])
+        let sourceAssets = uniqueSourceAssets(request.sourceAssets)
+        if sourceAssets.count == 1, let inputURL = sourceAssets[0].fileURL {
+            arguments.append(contentsOf: ["--image", inputURL.path, "0", "1.0"])
+            if request.options.frameCount > 1 {
+                arguments.append(contentsOf: [
+                    "--image",
+                    inputURL.path,
+                    String(request.options.frameCount - 1),
+                    "0.65"
+                ])
+            }
+        } else if sourceAssets.count > 1 {
+            let finalFrame = request.options.frameCount - 1
+            for (index, asset) in sourceAssets.enumerated() {
+                guard let inputURL = asset.fileURL else { continue }
+                let frameIndex = Int(
+                    (Double(index) * Double(finalFrame) / Double(sourceAssets.count - 1)).rounded()
+                )
+                arguments.append(contentsOf: [
+                    "--image", inputURL.path, String(frameIndex), "1.0"
+                ])
+            }
         }
         let untiledPixelArea = 1_280 * 720
         let outputPixelArea = request.options.width * request.options.height
@@ -365,6 +410,11 @@ public final class LTXVideoGenerationService: VideoGenerating, Sendable {
             }
         }
         return arguments
+    }
+
+    private static func uniqueSourceAssets(_ assets: [ImageAsset]) -> [ImageAsset] {
+        var seen = Set<UUID>()
+        return assets.filter { seen.insert($0.id).inserted }
     }
 
     private static func ffmpegExecutable() throws -> URL {
@@ -575,6 +625,7 @@ public enum LTXVideoRuntimeError: LocalizedError, Sendable {
     case unsupportedModel(String)
     case invalidFrameCount(Int)
     case missingInputFile
+    case tooManyImageAnchors(count: Int, frameCount: Int)
     case missingControlSource
     case modelNotInstalled(URL)
     case loraNotInstalled(URL)
@@ -599,7 +650,9 @@ public enum LTXVideoRuntimeError: LocalizedError, Sendable {
         case let .invalidFrameCount(frameCount):
             "LTX-2.3 幀數必須符合 8n+1，目前為 \(frameCount)。"
         case .missingInputFile:
-            "圖生影需要一張可讀取的本機圖片。"
+            "圖生影需要至少一張可讀取的本機圖片。"
+        case let .tooManyImageAnchors(count, frameCount):
+            "圖片錨點數量（\(count)）不可超過影片幀數（\(frameCount)）。"
         case .missingControlSource:
             "Profile 的 LoRA 需要來源圖片才能建立控制影片。"
         case let .modelNotInstalled(url):
